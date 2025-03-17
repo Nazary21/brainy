@@ -1,0 +1,1 @@
+"""Adapter modules for connecting to external services.""" 
