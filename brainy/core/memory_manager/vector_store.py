@@ -4,6 +4,7 @@ Vector store implementation using ChromaDB.
 This module provides vector database functionality for semantic search capabilities.
 """
 import os
+import shutil
 from typing import Dict, List, Any, Optional, Tuple
 import uuid
 from pathlib import Path
@@ -13,7 +14,6 @@ from chromadb.utils import embedding_functions
 
 from brainy.config import settings
 from brainy.utils.logging import get_logger
-from brainy.adapters.ai_providers import get_default_provider
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -48,14 +48,15 @@ class VectorStore:
         # Initialize ChromaDB client
         self.client = chromadb.PersistentClient(path=self.db_path)
         
-        # Get or create the collection
-        self.collection = self._get_or_create_collection()
-        
         # Initialize the embedding function
-        self.embedding_function = embedding_functions.OpenAIEmbeddingFunction(
-            api_key=settings.OPENAI_API_KEY,
-            model_name="text-embedding-ada-002"
+        # Use the local sentence-transformers embedding function with 384 dimensions
+        # instead of OpenAI embeddings with 1536 dimensions
+        self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name="all-MiniLM-L6-v2"
         )
+        
+        # Get or create the collection with the embedding function
+        self.collection = self._get_or_create_collection()
         
         logger.info(f"Initialized vector store at {self.db_path}")
     
@@ -63,10 +64,29 @@ class VectorStore:
         """Get or create the ChromaDB collection."""
         try:
             # Try to get the existing collection
-            return self.client.get_collection(name=self.collection_name)
-        except Exception:
-            # If it doesn't exist, create a new one
-            return self.client.create_collection(name=self.collection_name)
+            collection = self.client.get_collection(
+                name=self.collection_name,
+                embedding_function=self.embedding_function
+            )
+            logger.info(f"Using existing collection '{self.collection_name}'")
+            return collection
+        except Exception as e:
+            # If it doesn't exist or has incompatible dimensions, create a new one
+            # First, try to delete any existing collection with the same name
+            try:
+                self.client.delete_collection(name=self.collection_name)
+                logger.warning(f"Deleted existing collection '{self.collection_name}' due to potential embedding mismatch")
+            except Exception:
+                # Collection might not exist, which is fine
+                pass
+            
+            # Create a new collection
+            collection = self.client.create_collection(
+                name=self.collection_name,
+                embedding_function=self.embedding_function
+            )
+            logger.info(f"Created new collection '{self.collection_name}'")
+            return collection
     
     async def add_document(
         self,
@@ -88,21 +108,20 @@ class VectorStore:
         # Generate an ID if not provided
         doc_id = document_id or str(uuid.uuid4())
         
-        # Get the embedding from OpenAI
-        ai_provider = get_default_provider()
-        embedding = await ai_provider.generate_embedding(text)
-        
-        # Add the document to the collection
-        self.collection.add(
-            documents=[text],
-            embeddings=[embedding],
-            metadatas=[metadata or {}],
-            ids=[doc_id]
-        )
-        
-        logger.debug(f"Added document to vector store", document_id=doc_id)
-        
-        return doc_id
+        try:
+            # Add the document to the collection (the embedding will be generated automatically)
+            self.collection.add(
+                documents=[text],
+                metadatas=[metadata or {}],
+                ids=[doc_id]
+            )
+            
+            logger.debug(f"Added document to vector store", document_id=doc_id)
+            
+            return doc_id
+        except Exception as e:
+            logger.error(f"Error adding document to vector store: {e}")
+            raise
     
     def query(
         self,
@@ -146,50 +165,6 @@ class VectorStore:
             return documents
         except Exception as e:
             logger.error(f"Error querying vector store: {e}")
-            return []
-    
-    async def query_with_embedding(
-        self,
-        query_embedding: List[float],
-        filter_metadata: Optional[Dict[str, Any]] = None,
-        limit: int = 5
-    ) -> List[Dict[str, Any]]:
-        """
-        Query the vector store using a pre-computed embedding.
-        
-        Args:
-            query_embedding: Pre-computed embedding for the query
-            filter_metadata: Optional metadata filter to apply
-            limit: Maximum number of results to return
-            
-        Returns:
-            List of matching documents with their metadata and distances
-        """
-        try:
-            # Use the provided embedding for the query
-            results = self.collection.query(
-                query_embeddings=[query_embedding],
-                n_results=limit,
-                where=filter_metadata
-            )
-            
-            # Process results
-            documents = []
-            if results["documents"] and results["documents"][0]:
-                for i, doc in enumerate(results["documents"][0]):
-                    document = {
-                        "text": doc,
-                        "id": results["ids"][0][i] if results["ids"] and results["ids"][0] else None,
-                        "metadata": results["metadatas"][0][i] if results["metadatas"] and results["metadatas"][0] else {},
-                        "distance": results["distances"][0][i] if results["distances"] and results["distances"][0] else None
-                    }
-                    documents.append(document)
-            
-            logger.debug(f"Embedding query returned {len(documents)} results")
-            
-            return documents
-        except Exception as e:
-            logger.error(f"Error querying vector store with embedding: {e}")
             return []
     
     def delete_document(self, document_id: str) -> bool:

@@ -23,30 +23,33 @@ Always ensure consistency with [specs.md](specs.md) and update it if we change s
 - [x] Implement basic module system with Reminder module
 - [x] Organize test files in their own directory
 - [x] Update Telegram adapter to handle module features (reminders)
+- [x] Fix critical bugs in Telegram integration (circular imports, command handling)
+- [ ] Complete AI provider integration for responding to messages
 - [ ] Add error handling and logging infrastructure
 - [ ] Complete thorough testing of core components
 
 ## Next Tasks (Prioritized)
 
-1. **Telegram Integration Enhancements** - Medium Priority
-   - Add support for inline keyboards and callback queries
-   - Implement message formatting for better user experience
-   - Enhance reminder notifications with interactive elements
+1. **AI Integration and Message Handling** - High Priority
+   - Get the OpenAI integration working for message responses
+   - Ensure context is properly passed between components
+   - Test the full messaging cycle from user input to AI response
+   - Fix any issues in the conversation handler
 
-2. **Logging and Error Handling** - High Priority
+2. **Memory System Optimization** - Medium Priority
+   - Ensure the memory system properly stores and retrieves conversation history
+   - Test vector database for similar message retrieval
+   - Optimize token usage for context windows
+
+3. **Logging and Error Handling** - Medium Priority
    - Enhance logging with proper context information
    - Implement proper error recovery mechanisms
    - Add better error reporting to users through Telegram
 
-3. **Testing and Deployment** - High Priority
+4. **Testing and Deployment** - Medium Priority
    - Complete integration tests for core components
    - Set up Docker deployment with proper volume mounts 
    - Ensure environment variables are properly handled
-
-4. **Database Foundations** - Medium Priority
-   - Create database models for users, conversations, and preferences
-   - Implement connection and migration logic
-   - Start transitioning in-memory storage to database
 
 ## Phase 2: Persistent Storage and Enhanced Features (Upcoming)
 
@@ -101,4 +104,35 @@ Always ensure consistency with [specs.md](specs.md) and update it if we change s
 
 8. **Reminder Module**: Implemented a module for setting and managing reminders using both commands and natural language processing. Integrated with the Telegram adapter to send reminder notifications.
 
-9. **Test Organization**: Moved all test files to a dedicated `tests` directory for better project organization. 
+9. **Test Organization**: Moved all test files to a dedicated `tests` directory for better project organization.
+
+## Current Progress
+
+- [x] Telegram integration (basic functionality working)
+- [x] OpenAI integration (working for message responses)
+- [x] Standardized on 384-dimensional embeddings for vector store
+- [x] Fixed vector store to use sentence-transformers for embeddings
+- [ ] Complete RAG functionality 
+- [ ] Complete memory system optimization
+- [ ] Improve logging and error handling
+- [ ] Implement comprehensive testing
+
+## Current Priorities
+
+1. **Complete RAG functionality** - Now using 384-dimensional embeddings with sentence-transformers for better compatibility and lower cost
+2. **Optimize memory system** - Ensure conversations are properly stored and retrieved
+3. **Error handling** - Improve error handling throughout the application
+4. **Testing** - Implement comprehensive testing for all components
+
+## Known Issues
+
+- Circular import issues in some modules - partially fixed
+- RAG functionality needed updating to use consistent embedding dimensions
+- Error handling needs improvement in various components
+
+## Next Steps
+
+- Complete RAG functionality with 384-dimensional embeddings
+- Test and optimize the conversation flow
+- Ensure the system can handle multiple users and conversations
+- Improve error handling and logging throughout the application 

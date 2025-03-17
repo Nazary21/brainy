@@ -15,6 +15,9 @@ from brainy.core.conversation import get_conversation_handler
 from brainy.core.character import get_character_manager
 from brainy.core.memory_manager import get_memory_manager
 from brainy.core.modules import register_builtin_modules
+from brainy.core.conversation import ConversationHandler
+from brainy.adapters.messengers import TelegramAdapter
+from brainy.core.ai_provider import get_ai_provider_manager
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -28,6 +31,8 @@ app = FastAPI(
     redoc_url="/redoc" if settings.DEBUG else None,
 )
 
+# Store the telegram adapter instance globally
+_telegram_adapter = None
 
 @app.get("/health")
 async def health_check():
@@ -38,6 +43,8 @@ async def health_check():
 @app.on_event("startup")
 async def startup_event():
     """Initialize resources when the application starts up."""
+    global _telegram_adapter
+    
     # Create necessary directories
     data_dir = Path(__file__).parent / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -55,9 +62,16 @@ async def startup_event():
     logger.info(f"Vector DB path: {settings.VECTOR_DB_PATH}")
     
     # Initialize core components
-    get_memory_manager()  # Initialize memory manager
-    get_character_manager()  # Initialize character manager
-    get_conversation_handler()  # Initialize conversation handler
+    memory_manager = get_memory_manager()
+    character_manager = get_character_manager()
+    ai_provider_manager = get_ai_provider_manager()
+    
+    # Initialize conversation handler
+    conversation_handler = ConversationHandler(
+        memory_manager=memory_manager,
+        character_manager=character_manager,
+        ai_provider_manager=ai_provider_manager
+    )
     
     # Register built-in modules
     await register_builtin_modules()
@@ -67,19 +81,23 @@ async def startup_event():
     if not settings.TELEGRAM_BOT_TOKEN:
         logger.warning("Telegram bot token not set, skipping bot initialization")
     else:
-        # Get the Telegram adapter and start it
-        telegram_adapter = get_telegram_adapter()
-        asyncio.create_task(telegram_adapter.start())
+        # Initialize the Telegram adapter
+        _telegram_adapter = TelegramAdapter(
+            token=settings.TELEGRAM_BOT_TOKEN,
+            conversation_handler=conversation_handler
+        )
+        asyncio.create_task(_telegram_adapter.start())
         logger.info("Started Telegram bot adapter")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up resources when the application shuts down."""
+    global _telegram_adapter
+    
     # Stop the Telegram bot if it's running
-    if settings.TELEGRAM_BOT_TOKEN:
-        telegram_adapter = get_telegram_adapter()
-        await telegram_adapter.stop()
+    if _telegram_adapter is not None:
+        await _telegram_adapter.stop()
         logger.info("Stopped Telegram bot adapter")
     
     logger.info("Shutting down Brainy AI Bot Manager")

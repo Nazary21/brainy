@@ -80,24 +80,34 @@ class OpenAIProvider(AIProvider):
             params.update(kwargs)
             
             # Log the request (excluding message content for privacy)
-            logger.debug(
-                f"Sending request to OpenAI",
+            logger.info(
+                f"Sending request to OpenAI API",
                 model=params.get("model"),
                 temperature=params.get("temperature"),
                 max_tokens=params.get("max_tokens"),
                 message_count=len(formatted_messages)
             )
             
+            # Log API key status (securely)
+            api_key = self.client.api_key
+            logger.debug(f"API key status: {'Set (starts with ' + api_key[:4] + '...)' if api_key else 'Not set'}")
+            
             # Make the API request
+            logger.debug("Starting OpenAI API call")
             response = await self.client.chat.completions.create(**params)
+            logger.debug("Completed OpenAI API call")
             
             # Extract the response text
             response_text = response.choices[0].message.content
             
+            # Log a preview of the response
+            response_preview = response_text[:50] + "..." if len(response_text) > 50 else response_text
+            logger.info(f"Received response from OpenAI: {response_preview}")
+            
             return response_text
             
         except Exception as e:
-            logger.error(f"Error generating response from OpenAI: {str(e)}")
+            logger.error(f"Error generating response from OpenAI: {str(e)}", exc_info=True)
             raise
     
     @retry(

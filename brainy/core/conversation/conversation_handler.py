@@ -7,11 +7,12 @@ from typing import Dict, Optional, Any, List
 import asyncio
 
 from brainy.utils.logging import get_logger
-from brainy.core.memory_manager.memory_manager import ConversationMessage, get_memory_manager
-from brainy.core.character.character import Character, get_character_manager
+from brainy.core.memory_manager.memory_manager import ConversationMessage, MemoryManager, get_memory_manager
+from brainy.core.character.character import Character, CharacterManager, get_character_manager
 from brainy.adapters.ai_providers import get_default_provider, Message
 from brainy.core.modules import get_module_manager
 from brainy.config import settings
+from brainy.core.ai_provider.manager import AiProviderManager
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -31,28 +32,37 @@ class ConversationHandler:
     It serves as the central coordinator for the chat flow.
     """
     
-    def __init__(self):
-        """Initialize the conversation handler."""
-        # Get the memory manager
-        self._memory_manager = get_memory_manager()
+    def __init__(
+        self,
+        memory_manager: MemoryManager,
+        character_manager: CharacterManager,
+        ai_provider_manager: AiProviderManager,
+        use_context_search: Optional[bool] = None
+    ):
+        """
+        Initialize a conversation handler.
         
-        # Get the character manager
-        self._character_manager = get_character_manager()
-        
-        # Get the AI provider
-        self._ai_provider = get_default_provider()
-        
-        # Get the module manager
+        Args:
+            memory_manager: The memory manager to use
+            character_manager: The character manager to use
+            ai_provider_manager: The AI provider manager to use  
+            use_context_search: Whether to use context search. Defaults to settings.USE_CONTEXT_SEARCH
+        """
+        # Initialize components
+        self._memory_manager = memory_manager
+        self._character_manager = character_manager
+        self._ai_provider_manager = ai_provider_manager
         self._module_manager = get_module_manager()
         
         # Active conversation sessions by user ID
         self._active_sessions: Dict[str, Dict[str, Any]] = {}
         
-        # Maximum context messages to include in a conversation
-        self._max_context_messages = settings.MAX_CONTEXT_MESSAGES
-        
-        # Maximum similar messages to retrieve from vector search
+        # Initialize settings
+        self._max_context_length = settings.MAX_CONTEXT_LENGTH
         self._max_similar_messages = settings.MAX_SIMILAR_MESSAGES
+        
+        # Use context search
+        self._use_context_search = use_context_search if use_context_search is not None else settings.USE_CONTEXT_SEARCH
         
         logger.info("Initialized conversation handler")
     
@@ -142,40 +152,35 @@ class ConversationHandler:
         conversation_id: str
     ) -> List[ConversationMessage]:
         """
-        Retrieve relevant context from previous conversations using vector search.
+        Retrieve relevant messages from the conversation history.
         
         Args:
-            query_text: Text to search for relevant context
-            conversation_id: ID of the current conversation
+            query_text: The text to find relevant messages for
+            conversation_id: The ID of the conversation to search in
             
         Returns:
             List of relevant messages
         """
+        # Skip if context search is disabled
+        if not self._use_context_search:
+            logger.debug("Context search is disabled, skipping retrieval")
+            return []
+        
         try:
-            # Search for similar messages across all conversations
+            # Search for similar messages in the conversation
             similar_messages = await self._memory_manager.search_similar_messages(
                 query_text=query_text,
-                limit=self._max_similar_messages
+                conversation_id=conversation_id,
+                limit=settings.MAX_SIMILAR_MESSAGES
             )
             
-            # Skip if no similar messages found
-            if not similar_messages:
-                return []
+            # Log the results
+            logger.debug(
+                f"Retrieved {len(similar_messages)} similar messages",
+                conversation_id=conversation_id
+            )
             
-            # Add a context message with relevant information
-            context_messages = []
-            
-            # Add similar messages from other conversations as context
-            for message in similar_messages:
-                # Skip messages from the current conversation
-                if message.conversation_id == conversation_id:
-                    continue
-                
-                context_messages.append(message)
-            
-            logger.debug(f"Retrieved {len(context_messages)} relevant context messages")
-            
-            return context_messages
+            return similar_messages
         except Exception as e:
             logger.error(f"Error retrieving relevant context: {e}")
             return []
@@ -280,7 +285,7 @@ class ConversationHandler:
         # Get the conversation history, including the new message
         messages = await self._memory_manager.get_conversation_history(
             conversation_id, 
-            limit=self._max_context_messages
+            limit=self._max_context_length
         )
         
         # Check if we need to add a system message
@@ -289,7 +294,7 @@ class ConversationHandler:
             # Get the updated messages
             messages = await self._memory_manager.get_conversation_history(
                 conversation_id, 
-                limit=self._max_context_messages
+                limit=self._max_context_length
             )
         
         # Convert messages to AI messages
@@ -326,7 +331,7 @@ class ConversationHandler:
         
         # Generate a response using the AI provider
         try:
-            response_content = await self._ai_provider.generate_response(ai_messages)
+            response_content = await self._ai_provider_manager.generate_response(ai_messages)
             logger.debug(f"Generated response", user_id=user_id, platform=platform)
         except Exception as e:
             logger.error(f"Error generating response: {e}", user_id=user_id, platform=platform)
@@ -432,6 +437,17 @@ def get_conversation_handler() -> ConversationHandler:
     """
     global _conversation_handler
     if _conversation_handler is None:
-        _conversation_handler = ConversationHandler()
+        # Get the dependencies
+        memory_manager = get_memory_manager()
+        character_manager = get_character_manager()
+        from brainy.core.ai_provider import get_ai_provider_manager
+        ai_provider_manager = get_ai_provider_manager()
+        
+        # Create the conversation handler
+        _conversation_handler = ConversationHandler(
+            memory_manager=memory_manager,
+            character_manager=character_manager,
+            ai_provider_manager=ai_provider_manager
+        )
     
     return _conversation_handler 

@@ -4,6 +4,7 @@ Configuration settings for the Brainy application.
 from typing import Optional, Dict, Any
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import os
 
 
 class Settings(BaseSettings):
@@ -25,13 +26,14 @@ class Settings(BaseSettings):
     
     # Vector DB
     VECTOR_DB_PATH: str = Field(
-        "/data/vectordb", description="Path to vector database storage"
+        "./data/vectordb", description="Path to vector database storage"
     )
     
     # Memory settings
     USE_CONTEXT_SEARCH: bool = Field(True, description="Enable vector search for context retrieval")
     MAX_CONTEXT_MESSAGES: int = Field(10, description="Maximum number of messages to include in context")
     MAX_SIMILAR_MESSAGES: int = Field(3, description="Maximum number of similar messages to retrieve")
+    MAX_CONTEXT_LENGTH: int = Field(10, description="Maximum length of context in messages")
     
     # Logging
     LOG_LEVEL: str = Field(
@@ -49,6 +51,14 @@ class Settings(BaseSettings):
     # Character settings
     DEFAULT_CHARACTER_ID: str = Field(
         "default", description="Default character ID to use"
+    )
+    
+    # Embedding settings
+    EMBEDDING_MODEL: str = Field(
+        "all-MiniLM-L6-v2", description="SentenceTransformer model to use for embeddings"
+    )
+    EMBEDDING_DIMENSIONS: int = Field(
+        384, description="Dimensionality of the embeddings"
     )
     
     model_config = SettingsConfigDict(

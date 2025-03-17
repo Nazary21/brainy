@@ -36,19 +36,21 @@ class TelegramAdapter:
     including processing messages, commands, and sending responses.
     """
     
-    def __init__(self, token: str):
+    def __init__(self, token: str, conversation_handler=None):
         """
         Initialize the Telegram adapter.
         
         Args:
             token: Telegram bot API token
+            conversation_handler: Optional conversation handler to use
+                If not provided, will use the default conversation handler
         """
         self.token = token
         self.application: Optional[Application] = None
         self.bot: Optional[Bot] = None
         
         # Get the conversation handler
-        self._conversation_handler = get_conversation_handler()
+        self._conversation_handler = conversation_handler or get_conversation_handler()
         
         # Get the character manager
         self._character_manager = get_character_manager()
@@ -145,13 +147,21 @@ class TelegramAdapter:
             if self.application is None:
                 await self.setup()
             
-            # Start polling in a background task
+            # Initialize the application
             await self.application.initialize()
-            await self.application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
             
-            logger.info("Started Telegram bot - now listening for messages")
+            # Start polling in a background task
+            logger.info("Starting Telegram bot polling...")
+            
+            async with self.application:
+                await self.application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+                logger.info("Telegram bot is now listening for messages")
+                
+                # Keep the task running
+                while True:
+                    await asyncio.sleep(1)
         except Exception as e:
-            logger.error(f"Failed to start Telegram bot: {e}")
+            logger.error(f"Failed to start Telegram bot: {e}", exc_info=True)
             # Try to restart after a delay if there was an error
             asyncio.create_task(self._delayed_restart(10))
     
@@ -396,6 +406,7 @@ class TelegramAdapter:
     async def _message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle regular text messages."""
         if update.effective_chat is None or update.effective_user is None or update.message is None:
+            logger.warning("Received message with missing chat, user, or message information")
             return
         
         user_id = str(update.effective_user.id)
@@ -403,7 +414,18 @@ class TelegramAdapter:
         message_text = update.message.text
         
         if not message_text:
+            logger.warning(f"Received empty message from user {user_id}")
             return
+        
+        # TEMPORARY DEBUG RESPONSE - Remove after testing
+        await context.bot.send_message(chat_id=chat_id, text=f"DEBUG: I received your message: '{message_text}'")
+        
+        # Log the incoming message
+        logger.info(
+            f"Received message from user {user_id}: '{message_text}'",
+            user_id=user_id,
+            platform=self._platform_name
+        )
         
         # Store the user's chat ID for reminders
         self._user_chat_map[user_id] = chat_id
@@ -420,6 +442,8 @@ class TelegramAdapter:
             }
         }
         
+        logger.debug(f"Created metadata for message from user {user_id}")
+        
         # Create a conversation message object for module processing
         message = ConversationMessage(
             message_id=str(update.message.message_id),
@@ -432,41 +456,48 @@ class TelegramAdapter:
             metadata=metadata
         )
         
+        logger.debug(f"Created conversation message object for user {user_id}")
+        
         # Check if any module can handle this message based on trigger patterns
         module_response = None
         for module in self._module_manager.get_enabled_modules():
-            if module.can_process(message_text):
+            logger.debug(f"Checking if module {module.module_id} can process message")
+            if module.matches_message(message_text):
+                logger.info(f"Module {module.module_id} matched message pattern")
                 try:
                     # Call the module's process method
+                    logger.debug(f"Processing message with module {module.module_id}")
                     module_response = await module.process_message(
                         message, 
                         {"telegram_adapter": self}
                     )
                     if module_response:
+                        logger.info(f"Module {module.module_id} provided a response")
                         break
                 except Exception as e:
-                    logger.error(f"Error in module processing: {e}", module_id=module.module_id)
+                    logger.error(f"Error in module processing: {e}", exc_info=True, module_id=module.module_id)
         
         # If a module handled it, send the response and return
         if module_response:
+            logger.info(f"Sending module response to user {user_id}")
             await context.bot.send_message(chat_id=chat_id, text=module_response)
             return
         
-        # Log the incoming message
-        logger.info(
-            f"Received message from user {user_id}",
-            user_id=user_id,
-            platform=self._platform_name
-        )
-        
         # Indicate that the bot is typing
-        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        try:
+            logger.debug(f"Sending typing action to chat {chat_id}")
+            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        except Exception as e:
+            logger.error(f"Error sending typing action: {e}", exc_info=True)
         
         try:
             # Process the message and get a response
+            logger.info(f"Processing message with conversation handler for user {user_id}")
             response = await self._conversation_handler.process_user_message(
                 user_id, self._platform_name, message_text, metadata
             )
+            
+            logger.info(f"Received response from conversation handler: {response[:50]}...")
             
             # Send the response
             await context.bot.send_message(chat_id=chat_id, text=response)
@@ -477,7 +508,7 @@ class TelegramAdapter:
                 platform=self._platform_name
             )
         except Exception as e:
-            logger.error(f"Error processing message: {e}", user_id=user_id, platform=self._platform_name)
+            logger.error(f"Error processing message: {e}", exc_info=True, user_id=user_id, platform=self._platform_name)
             await context.bot.send_message(
                 chat_id=chat_id,
                 text="Sorry, I'm having trouble processing your message. Please try again later."

@@ -304,11 +304,11 @@ class MemoryManager:
         limit: int = 5
     ) -> List[ConversationMessage]:
         """
-        Search for similar messages using vector similarity.
+        Search for messages that are semantically similar to the query.
         
         Args:
-            query_text: Text to search for
-            conversation_id: Optional conversation ID to limit search to
+            query_text: The text to find similar messages for
+            conversation_id: Optional ID of conversation to filter by
             limit: Maximum number of results to return
             
         Returns:
@@ -320,40 +320,40 @@ class MemoryManager:
             if conversation_id:
                 filter_metadata = {"conversation_id": conversation_id}
             
-            # Search the vector store
-            results = self._vector_store.query(
+            # Query the vector store for similar messages
+            similar_docs = self._vector_store.query(
                 query_text=query_text,
                 filter_metadata=filter_metadata,
                 limit=limit
             )
             
-            # Convert results to ConversationMessage objects
-            messages = []
-            for result in results:
-                metadata = result.get("metadata", {})
-                
-                # Create a message from the metadata
-                message = ConversationMessage(
-                    user_id=metadata.get("user_id", ""),
-                    role=metadata.get("role", ""),
-                    content=result.get("text", ""),
-                    conversation_id=metadata.get("conversation_id", ""),
-                    platform=metadata.get("platform", ""),
-                    message_id=metadata.get("message_id", ""),
-                    vector_id=result.get("id")
-                )
-                
-                # Parse timestamp if available
-                timestamp_str = metadata.get("timestamp")
-                if timestamp_str:
-                    try:
-                        message.timestamp = datetime.fromisoformat(timestamp_str)
-                    except ValueError:
-                        pass
-                
-                messages.append(message)
+            # Skip if no similar documents found
+            if not similar_docs:
+                return []
             
-            logger.debug(f"Search returned {len(messages)} similar messages")
+            # Convert the documents to ConversationMessage objects
+            messages = []
+            for doc in similar_docs:
+                # Get the message ID from the document metadata
+                message_id = doc["metadata"].get("message_id")
+                
+                # Skip if no message ID found
+                if not message_id:
+                    continue
+                
+                # Find the message in the in-memory store
+                conv_id = doc["metadata"].get("conversation_id")
+                if conv_id and conv_id in self._messages:
+                    for msg in self._messages[conv_id]:
+                        if msg.message_id == message_id:
+                            messages.append(msg)
+                            break
+            
+            logger.debug(
+                f"Found {len(messages)} similar messages",
+                query=query_text,
+                conversation_id=conversation_id
+            )
             
             return messages
         except Exception as e:
