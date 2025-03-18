@@ -8,6 +8,7 @@ import sys
 from typing import Optional, Dict, Any, List, Callable
 import logging
 import traceback
+import datetime
 
 from telegram import Update, Bot, BotCommand
 from telegram.ext import (
@@ -24,7 +25,7 @@ from brainy.config import settings
 from brainy.core.conversation import get_conversation_handler
 from brainy.core.character import get_character_manager
 from brainy.core.modules import get_module_manager, ModuleManager
-from brainy.core.memory_manager import ConversationMessage
+from brainy.core.memory_manager import ConversationMessage, MessageRole
 
 # Add custom debug logging if available
 try:
@@ -108,10 +109,16 @@ class TelegramAdapter:
         self.application.add_handler(CommandHandler("character", self._character_command))
         self.application.add_handler(CommandHandler("characters", self._list_characters_command))
         
+        # Add explicit handlers for reminder commands - this ensures they're processed directly
+        self.application.add_handler(CommandHandler("remind", self._module_command_handler))
+        self.application.add_handler(CommandHandler("reminders", self._module_command_handler))
+        self.application.add_handler(CommandHandler("clear_reminders", self._module_command_handler))
+        
         # Register module command handlers for dynamically registered commands
         # We'll catch all commands and route them to modules if applicable
         self.application.add_handler(
-            MessageHandler(filters.COMMAND & ~filters.Command(["start", "help", "clear", "character", "characters"]), 
+            MessageHandler(filters.COMMAND & ~filters.Command(["start", "help", "clear", "character", "characters", 
+                                                              "remind", "reminders", "clear_reminders"]), 
                            self._module_command_handler)
         )
         
@@ -451,15 +458,32 @@ class TelegramAdapter:
         user_id = str(update.effective_user.id)
         chat_id = update.effective_chat.id
         
-        # Get the character ID from arguments
+        # If no character ID is provided, show the current character
         if not context.args or len(context.args) < 1:
+            # Get the current character for this user
+            conversation_id = f"{self._platform_name}:{user_id}"
+            current_character = self._character_manager.get_character_for_conversation(conversation_id)
+            
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="Please specify a character ID. Use /characters to see available characters."
+                text=f"Current character: {current_character.name} (ID: {current_character.character_id})\n\n"
+                     f"Description: {current_character.description}\n\n"
+                     f"To change character, use /character <id>\n"
+                     f"To see available characters, use /characters"
             )
             return
         
         character_id = context.args[0]
+        
+        # Check if trying to switch to the same character
+        conversation_id = f"{self._platform_name}:{user_id}"
+        current_character = self._character_manager.get_character_for_conversation(conversation_id)
+        if current_character.character_id == character_id:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"You're already using the '{current_character.name}' character."
+            )
+            return
         
         # Change the character
         character = await self._conversation_handler.change_character(
@@ -477,18 +501,26 @@ class TelegramAdapter:
         await self._conversation_handler.clear_conversation(user_id, self._platform_name)
         
         # Send the greeting for the new character
-        greeting = character.greeting or f"Hello! I'm {character.name}. How can I help you today?"
+        greeting = character.greeting or f"Hello! I'm now using the {character.name} character. How can I help you today?"
         
-        await context.bot.send_message(chat_id=chat_id, text=greeting)
+        await context.bot.send_message(
+            chat_id=chat_id, 
+            text=f"✅ Character changed to: {character.name}\n\n{greeting}"
+        )
         
         logger.info(f"User {user_id} changed character to '{character.name}'")
     
     async def _list_characters_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle the /characters command."""
-        if update.effective_chat is None:
+        if update.effective_chat is None or update.effective_user is None:
             return
         
         chat_id = update.effective_chat.id
+        user_id = str(update.effective_user.id)
+        
+        # Get the current character for this user
+        conversation_id = f"{self._platform_name}:{user_id}"
+        current_character = self._character_manager.get_character_for_conversation(conversation_id)
         
         # Get all available characters
         characters = self._character_manager.get_all_characters()
@@ -498,15 +530,29 @@ class TelegramAdapter:
             return
         
         # Format the character list
-        character_list = "Available characters:\n\n"
+        character_list = "🎭 **Available Characters** 🎭\n\n"
+        
         for character in characters:
-            character_list += f"ID: {character.character_id}\n"
-            character_list += f"Name: {character.name}\n"
-            character_list += f"Description: {character.description}\n\n"
+            # Check if this is the current character
+            is_current = character.character_id == current_character.character_id
+            prefix = "✅ " if is_current else "   "
+            
+            character_list += f"{prefix}**{character.name}** (ID: `{character.character_id}`)\n"
+            character_list += f"   *{character.description}*\n"
+            
+            # Only show a preview of the system prompt (first 50 chars)
+            system_preview = character.system_prompt[:50] + "..." if len(character.system_prompt) > 50 else character.system_prompt
+            character_list += f"   System: {system_preview}\n\n"
         
-        character_list += "To switch character, use /character <id>"
+        character_list += "To switch character, use `/character <id>`\n"
+        character_list += "To see your current character details, use `/character`"
         
-        await context.bot.send_message(chat_id=chat_id, text=character_list)
+        # Send message with markdown parsing
+        await context.bot.send_message(
+            chat_id=chat_id, 
+            text=character_list,
+            parse_mode='Markdown'
+        )
     
     async def _module_command_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle commands that are processed by modules."""
@@ -519,6 +565,7 @@ class TelegramAdapter:
         message_text = update.message.text
         chat_id = update.effective_chat.id
         
+        print(f"[DEBUG] Processing module command: {message_text}")
         logger.info(f"Processing module command from user {user_id}: {message_text}")
         debug("telegram", f"Processing module command from user {user_id}: {message_text}")
         
@@ -529,43 +576,61 @@ class TelegramAdapter:
         try:
             # Parse the command
             command, args = self._module_manager.parse_command(message_text)
+            print(f"[DEBUG] Parsed command: '{command}' with args: {args}")
             
-            # Get all module commands
+            # Print all available module commands
             all_module_commands = self._get_all_module_commands()
+            print(f"[DEBUG] Available module commands: {list(all_module_commands.keys())}")
             
             # Check if the command is handled by a module
             if command in all_module_commands:
+                print(f"[DEBUG] Command '{command}' is registered, processing it")
                 # Show typing indicator
                 await context.bot.send_chat_action(chat_id=chat_id, action="typing")
                 
                 # Create a conversation message object
+                # Use the correct format for conversation_id (platform:user_id)
+                conversation_id = f"{self._platform_name}:{user_id}"
                 conv_message = ConversationMessage(
-                    user_id=user_id,
-                    role="user",
+                    role=MessageRole.USER,
                     content=message_text,
-                    conversation_id=f"{user_id}:telegram",
-                    platform="telegram"
+                    metadata={
+                        "user_id": user_id,
+                        "platform": self._platform_name,
+                        "conversation_id": conversation_id
+                    }
                 )
                 
                 # Process the command with the module manager
+                print(f"[DEBUG] Calling module_manager.process_command for '{command}'")
                 response = await self._module_manager.process_command(conv_message)
+                print(f"[DEBUG] Module response: {response}")
                 
                 if response:
-                    await context.bot.send_message(chat_id=chat_id, text=response)
+                    print(f"[DEBUG] Sending response: {response[:50]}...")
+                    await context.bot.send_message(
+                        chat_id=chat_id, 
+                        text=response,
+                        parse_mode='Markdown'  # Enable markdown parsing for responses
+                    )
                     logger.info(f"Sent module command response to user {user_id}")
                     debug("telegram", f"Sent module command response to user {user_id}")
                 else:
+                    print(f"[DEBUG] No response received from module")
                     await context.bot.send_message(
                         chat_id=chat_id,
                         text="I'm sorry, I couldn't process that command."
                     )
             else:
+                print(f"[DEBUG] Command '{command}' not found in module commands")
                 logger.warning(f"Unknown command: {command}")
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"Unknown command: {command}. Type /help to see available commands."
                 )
         except Exception as e:
+            print(f"[DEBUG] Error processing module command: {str(e)}")
+            print(f"[DEBUG] Traceback: {traceback.format_exc()}")
             logger.error(f"Error processing module command: {str(e)}", exc_info=True)
             if debug_log:
                 debug_logging.log_error("TELEGRAM", f"Error processing module command: {str(e)}", exc_info=True)
@@ -643,24 +708,54 @@ class TelegramAdapter:
         # Check if we have a chat ID for this user
         if user_id not in self._user_chat_map:
             logger.error(f"No chat ID for user {user_id}, cannot send reminder")
+            if debug_log:
+                debug_logging.log_error("TELEGRAM", f"No chat ID for user {user_id}, cannot send reminder")
             return False
         
         chat_id = self._user_chat_map[user_id]
         
         try:
+            # Current time for timestamp
+            current_time = datetime.datetime.now().strftime("%I:%M %p")
+            
             # Format the reminder message
-            reminder_text = f"🔔 REMINDER: {task}"
+            reminder_text = (
+                f"⏰ **Reminder!**\n\n"
+                f"You asked me to remind you to:\n"
+                f"\"{task}\"\n\n"
+                f"Time: {current_time}\n\n"
+                f"_To set another reminder, use /remind_"
+            )
+            
+            # Log that we're sending a reminder
+            logger.info(f"Attempting to send reminder to user {user_id} at chat {chat_id}")
+            print(f"[DEBUG] Sending reminder to chat {chat_id}: {task}")
+            
+            if debug_log:
+                debug_logging.log_telegram(f"Sending reminder: '{task}' to user {user_id} at chat {chat_id}")
             
             # Send the message
             if self.bot:
-                await self.bot.send_message(chat_id=chat_id, text=reminder_text)
-                logger.info(f"Sent reminder to user {user_id}: {task}")
+                await self.bot.send_message(
+                    chat_id=chat_id, 
+                    text=reminder_text,
+                    parse_mode='Markdown'
+                )
+                logger.info(f"Successfully sent reminder to user {user_id}: {task}")
+                if debug_log:
+                    debug_logging.log_telegram(f"Successfully sent reminder: '{task}' to user {user_id}")
                 return True
             else:
                 logger.error("Bot not initialized, cannot send reminder")
+                if debug_log:
+                    debug_logging.log_error("TELEGRAM", "Bot not initialized, cannot send reminder")
                 return False
         except Exception as e:
-            logger.error(f"Error sending reminder: {e}", user_id=user_id)
+            logger.error(f"Error sending reminder to user {user_id}: {str(e)}", exc_info=True)
+            if debug_log:
+                debug_logging.log_error("TELEGRAM", f"Error sending reminder to user {user_id}: {str(e)}", exc_info=True)
+            print(f"[DEBUG] Error sending reminder: {str(e)}")
+            print(f"[DEBUG] {traceback.format_exc()}")
             return False
 
 

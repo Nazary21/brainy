@@ -207,6 +207,8 @@ class ConversationHandler:
             return []
         
         try:
+            logger.debug(f"RAG: Starting semantic search for: '{query_text[:50]}...' in conversation {conversation_id}")
+            
             # Search for similar messages in the conversation
             similar_messages = await self._memory_manager.search_similar_messages(
                 query_text=query_text,
@@ -216,9 +218,14 @@ class ConversationHandler:
             
             # Log the results
             logger.debug(
-                f"Retrieved {len(similar_messages)} similar messages",
+                f"RAG: Retrieved {len(similar_messages)} similar messages",
                 conversation_id=conversation_id
             )
+            
+            # Log each retrieved message
+            for i, msg in enumerate(similar_messages):
+                content_preview = msg.content[:50] + "..." if len(msg.content) > 50 else msg.content
+                logger.debug(f"RAG: Retrieved message {i+1}: {content_preview}")
             
             return similar_messages
         except Exception as e:

@@ -341,45 +341,72 @@ class MemoryManager:
             List of similar messages
         """
         try:
+            logger.info(f"Vector search: Starting search for '{query_text[:30]}...'")
+            
             # Prepare metadata filter if conversation_id is provided
             filter_metadata = None
             if conversation_id:
                 filter_metadata = {"conversation_id": conversation_id}
+                logger.info(f"Vector search: Filtering by conversation_id: {conversation_id}")
+            
+            # Check if vector store is initialized
+            if not self._vector_store:
+                logger.error("Vector search: Vector store not initialized")
+                return []
+                
+            # Log the vector store path
+            logger.info(f"Vector search: Using vector store at path: {self._vector_store.db_path}")
             
             # Query the vector store for similar messages
+            logger.info(f"Vector search: Querying vector store with limit: {limit}")
             similar_docs = self._vector_store.query(
                 query_text=query_text,
                 filter_metadata=filter_metadata,
                 limit=limit
             )
             
-            # Skip if no similar documents found
-            if not similar_docs:
-                return []
+            logger.info(f"Vector search: Found {len(similar_docs)} document(s) in vector store")
             
-            # Convert the documents to ConversationMessage objects
+            # Convert to ConversationMessages
             messages = []
             for doc in similar_docs:
-                # Get the message ID from the document metadata
-                message_id = doc["metadata"].get("message_id")
-                
-                # Skip if no message ID found
-                if not message_id:
-                    continue
-                
-                # Find the message in the in-memory store
-                if message_id in self._messages:
-                    messages.append(self._messages[message_id])
+                try:
+                    # Extract message details from document
+                    message_id = doc.get("metadata", {}).get("message_id")
+                    
+                    # If we have the message in memory, use that
+                    if message_id in self._messages:
+                        messages.append(self._messages[message_id])
+                        logger.info(f"Vector search: Retrieved message {message_id} from memory")
+                    else:
+                        # Otherwise, construct a new message from the document
+                        metadata = doc.get("metadata", {})
+                        
+                        # Parse timestamp if available
+                        timestamp_str = metadata.get("timestamp")
+                        timestamp = None
+                        if timestamp_str:
+                            try:
+                                timestamp = datetime.fromisoformat(timestamp_str)
+                            except ValueError:
+                                timestamp = datetime.now()
+                        
+                        message = ConversationMessage(
+                            role=MessageRole(metadata.get("role", "user")),
+                            content=doc.get("text", ""),
+                            metadata=metadata,
+                            message_id=message_id,
+                            timestamp=timestamp
+                        )
+                        messages.append(message)
+                        logger.info(f"Vector search: Constructed message from document {message_id}")
+                except Exception as e:
+                    logger.error(f"Vector search: Error converting document to message: {str(e)}")
             
-            logger.debug(
-                f"Found {len(messages)} similar messages",
-                query=query_text,
-                conversation_id=conversation_id
-            )
-            
+            logger.info(f"Vector search: Returning {len(messages)} message(s)")
             return messages
         except Exception as e:
-            logger.error(f"Error searching for similar messages: {e}")
+            logger.error(f"Vector search: Error searching similar messages: {str(e)}", exc_info=True)
             return []
 
 

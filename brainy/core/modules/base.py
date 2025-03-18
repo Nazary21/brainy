@@ -6,8 +6,11 @@ This module defines the core interfaces for creating extension modules.
 from abc import ABC, abstractmethod
 from typing import Dict, List, Any, Optional, Callable, Set, Tuple
 import re
+import inspect
+import datetime
 
 from brainy.utils.logging import get_logger
+from brainy.config import settings
 from brainy.core.memory_manager import ConversationMessage
 
 # Initialize logger
@@ -44,6 +47,16 @@ class Module(ABC):
         
         # Register basic commands
         self.register_command("help", self.help_command, "Show help for this module")
+        
+        # For debugging/development purposes
+        if settings.DEBUG:
+            self.register_command(
+                "debug_rag",
+                self.debug_rag_command,
+                "Debug RAG retrieval for a given query",
+                usage="/debug_rag <query>",
+                examples=["/debug_rag What is machine learning?"]
+            )
         
         logger.info(f"Initialized module: {self.name} ({self.module_id})")
     
@@ -188,6 +201,77 @@ class Module(ABC):
             "is_enabled": self.is_enabled,
             "commands": list(self._commands.keys())
         }
+    
+    async def debug_rag_command(
+        self,
+        message: ConversationMessage,
+        args: List[str]
+    ) -> str:
+        """
+        Debug command to show what RAG context is being retrieved.
+        
+        Args:
+            message: The message containing the command
+            args: Command arguments (the query text)
+            
+        Returns:
+            Debug information about retrieved context
+        """
+        if not args:
+            return "Please provide a query to test RAG retrieval."
+        
+        query_text = " ".join(args)
+        
+        try:
+            # Get the conversation ID
+            user_id = message.metadata.get("user_id")
+            platform = message.metadata.get("platform")
+            if not user_id or not platform:
+                return "Error: User information not available."
+            
+            conversation_id = f"{platform}:{user_id}"
+            
+            logger.info(f"RAG DEBUG: Testing query '{query_text}' for conversation {conversation_id}")
+            
+            # Get the memory manager
+            from brainy.core.memory_manager import get_memory_manager
+            memory_manager = get_memory_manager()
+            
+            # Log vector store path
+            from brainy.config import settings
+            logger.info(f"RAG DEBUG: Vector DB path: {settings.VECTOR_DB_PATH}")
+            
+            # Search for similar messages
+            logger.info(f"RAG DEBUG: Searching for similar messages...")
+            similar_messages = await memory_manager.search_similar_messages(
+                query_text=query_text,
+                conversation_id=conversation_id,
+                limit=5
+            )
+            
+            if not similar_messages:
+                logger.info(f"RAG DEBUG: No similar messages found for query: '{query_text}'")
+                return f"No similar messages found for query: '{query_text}'"
+            
+            # Format the results
+            logger.info(f"RAG DEBUG: Found {len(similar_messages)} similar messages")
+            results = f"Found {len(similar_messages)} similar messages for query: '{query_text}'\n\n"
+            
+            for i, msg in enumerate(similar_messages, 1):
+                # Truncate content if too long
+                content = msg.content
+                if len(content) > 100:
+                    content = content[:97] + "..."
+                
+                results += f"{i}. {msg.role}: {content}\n"
+                results += f"   Time: {msg.timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                logger.info(f"RAG DEBUG: Result {i}: {msg.role} message from {msg.timestamp}")
+            
+            return results
+        except Exception as e:
+            error_msg = f"Error testing RAG retrieval: {str(e)}"
+            logger.error(f"RAG DEBUG ERROR: {error_msg}", exc_info=True)
+            return error_msg
 
 
 class ModuleManager:

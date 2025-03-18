@@ -88,26 +88,26 @@ class ReminderModule(Module):
         # Check if the message matches any of our patterns
         message_text = message.content.strip()
         
-        # Pattern 1: "remind me to X in Y minutes/hours/days"
-        match = re.search(r"remind\s+(?:me\s+)?(?:to\s+)?(.+?)\s+in\s+(\d+)\s+(\w+)", message_text, re.IGNORECASE)
+        # Pattern 1: "remind me to X in Y minutes/hours/etc."
+        pattern1 = r"remind\s+(?:me\s+)?(?:to\s+)?(.+?)\s+in\s+(\d+)\s+(\w+)"
+        match = re.search(pattern1, message_text, re.IGNORECASE)
         if match:
             task = match.group(1).strip()
             quantity = int(match.group(2))
             unit = match.group(3).lower()
-            
             return await self._handle_reminder_match(message, task, quantity, unit)
         
-        # Pattern 2: "set a reminder for X in Y minutes/hours/days"
-        match = re.search(r"set\s+(?:a\s+)?reminder\s+(?:for\s+)?(.+?)\s+in\s+(\d+)\s+(\w+)", message_text, re.IGNORECASE)
+        # Pattern 2: "set a reminder for X in Y minutes/hours/etc."
+        pattern2 = r"set\s+(?:a\s+)?reminder\s+(?:for\s+)?(.+?)\s+in\s+(\d+)\s+(\w+)"
+        match = re.search(pattern2, message_text, re.IGNORECASE)
         if match:
             task = match.group(1).strip()
             quantity = int(match.group(2))
             unit = match.group(3).lower()
-            
             return await self._handle_reminder_match(message, task, quantity, unit)
         
         return None
-    
+
     async def _handle_reminder_match(
         self,
         message: ConversationMessage,
@@ -116,17 +116,25 @@ class ReminderModule(Module):
         unit: str
     ) -> str:
         """
-        Handle a matched reminder request.
+        Handle a matched reminder pattern.
         
         Args:
-            message: The message containing the reminder request
-            task: The task to remind about
-            quantity: The time quantity
-            unit: The time unit (minutes, hours, days)
+            message: The message containing the reminder
+            task: The task to be reminded of
+            quantity: The quantity of time units
+            unit: The time unit (minute, hour, day, etc.)
             
         Returns:
             Response message
         """
+        # Get the user ID from metadata
+        user_id = message.metadata.get("user_id")
+        conversation_id = message.metadata.get("conversation_id")
+        platform = message.metadata.get("platform")
+        
+        if not user_id or not conversation_id or not platform:
+            return "⚠️ Error: User information not available. Please try again."
+        
         # Normalize the unit to singular form
         if unit.endswith('s'):
             unit = unit[:-1]
@@ -144,10 +152,10 @@ class ReminderModule(Module):
             reminder_time = now + datetime.timedelta(days=quantity)
             unit_str = "day" if quantity == 1 else "days"
         else:
-            return f"Sorry, I don't understand the time unit '{unit}'. Please use minutes, hours, or days."
+            return f"⚠️ Sorry, I don't understand the time unit '{unit}'. Please use minutes, hours, or days."
         
         # Set the reminder
-        await self._set_reminder(message.user_id, message.conversation_id, message.platform, task, reminder_time)
+        await self._set_reminder(user_id, conversation_id, platform, task, reminder_time)
         
         # Format the response
         formatted_time = reminder_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -168,20 +176,40 @@ class ReminderModule(Module):
         Returns:
             Response message
         """
-        if len(args) < 3:
+        # If no arguments provided, show usage information
+        if not args or len(args) < 3:
             return (
-                "⚠️ Please specify a time, unit, and message for your reminder.\n\n"
-                "Usage: /remind <time> <unit> <message>\n\n"
-                "Examples:\n"
-                "/remind 5 minutes check oven\n"
-                "/remind 1 hour call mom\n"
-                "/remind 2 days review document"
+                "⏰ **Reminder Help**\n\n"
+                "To set a reminder, use the format:\n"
+                "`/remind <time> <unit> <message>`\n\n"
+                "📝 **Examples:**\n"
+                "• `/remind 5 minutes check oven`\n"
+                "• `/remind 1 hour call mom`\n"
+                "• `/remind 2 days review document`\n\n"
+                "⚙️ **Available Commands:**\n"
+                "• `/reminders` - List your active reminders\n"
+                "• `/clear_reminders` - Delete all reminders"
             )
         
         try:
+            # Get the user ID from metadata
+            user_id = message.metadata.get("user_id")
+            conversation_id = message.metadata.get("conversation_id")
+            platform = message.metadata.get("platform")
+            
+            if not user_id or not conversation_id or not platform:
+                return "⚠️ Error: User information not available. Please try again."
+            
             quantity = int(args[0])
             unit = args[1].lower()
             task = " ".join(args[2:])
+            
+            # Validate input
+            if quantity <= 0:
+                return "⚠️ Please provide a positive number for the time."
+                
+            if not task or len(task) < 2:
+                return "⚠️ Please provide a more descriptive message for your reminder."
             
             # Normalize the unit to singular form
             if unit.endswith('s'):
@@ -203,11 +231,42 @@ class ReminderModule(Module):
                 return f"⚠️ Sorry, I don't understand the time unit '{unit}'. Please use minutes, hours, or days."
             
             # Set the reminder
-            await self._set_reminder(message.user_id, message.conversation_id, message.platform, task, reminder_time)
+            await self._set_reminder(user_id, conversation_id, platform, task, reminder_time)
             
-            # Format the response
-            formatted_time = reminder_time.strftime("%Y-%m-%d %H:%M:%S")
-            return f"✅ I'll remind you to {task} in {quantity} {unit_str} (at {formatted_time})."
+            # Calculate time difference in a more human-readable format
+            time_diff = reminder_time - now
+            days = time_diff.days
+            hours, remainder = divmod(time_diff.seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            
+            time_parts = []
+            if days > 0:
+                time_parts.append(f"{days} day{'s' if days != 1 else ''}")
+            if hours > 0:
+                time_parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+            if minutes > 0:
+                time_parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+            if seconds > 0 and not (days or hours or minutes):
+                time_parts.append(f"{seconds} second{'s' if seconds != 1 else ''}")
+            
+            human_time = ", ".join(time_parts)
+            
+            # Format the response with more details
+            formatted_date = reminder_time.strftime("%A, %b %d")
+            formatted_time = reminder_time.strftime("%I:%M %p")
+            
+            # Count active reminders
+            active_count = len(self._active_reminders.get(user_id, []))
+            
+            return (
+                f"✅ **Reminder Set!**\n\n"
+                f"I'll remind you about: \"{task}\"\n\n"
+                f"⏰ Due in: {human_time}\n"
+                f"📅 Date: {formatted_date}\n"
+                f"🕒 Time: {formatted_time}\n\n"
+                f"You now have {active_count} active reminder{'s' if active_count != 1 else ''}. "
+                f"Use /reminders to see all."
+            )
             
         except ValueError:
             return "⚠️ Please specify a valid number for the time."
@@ -227,10 +286,14 @@ class ReminderModule(Module):
         Returns:
             Response message
         """
-        user_id = message.user_id
+        # Get the user ID from metadata
+        user_id = message.metadata.get("user_id")
+        
+        if not user_id:
+            return "⚠️ Error: User information not available. Please try again."
         
         if user_id not in self._active_reminders or not self._active_reminders[user_id]:
-            return "You don't have any active reminders."
+            return "You don't have any active reminders. Use /remind <time> <unit> <message> to set one."
         
         reminders = self._active_reminders[user_id]
         
@@ -238,12 +301,37 @@ class ReminderModule(Module):
         reminders.sort(key=lambda r: r["time"])
         
         # Format the response
-        response = "Your active reminders:\n\n"
+        response = "📋 Your active reminders:\n\n"
+        
+        now = datetime.datetime.now()
         
         for i, reminder in enumerate(reminders, 1):
-            time_str = reminder["time"].strftime("%Y-%m-%d %H:%M:%S")
-            response += f"{i}. {reminder['task']} (at {time_str})\n"
-        
+            # Calculate time remaining
+            time_until = reminder["time"] - now
+            days = time_until.days
+            hours, remainder = divmod(time_until.seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            
+            # Format time in a more readable way
+            if days > 0:
+                time_remaining = f"{days} day{'s' if days != 1 else ''}, {hours} hour{'s' if hours != 1 else ''}"
+            elif hours > 0:
+                time_remaining = f"{hours} hour{'s' if hours != 1 else ''}, {minutes} minute{'s' if minutes != 1 else ''}"
+            elif minutes > 0:
+                time_remaining = f"{minutes} minute{'s' if minutes != 1 else ''}"
+            else:
+                time_remaining = f"{seconds} second{'s' if seconds != 1 else ''}"
+                
+            # Format date and time
+            formatted_time = reminder["time"].strftime("%I:%M %p on %A, %b %d")
+            
+            response += (
+                f"{i}. \"{reminder['task']}\"\n"
+                f"   ⏰ Due in: {time_remaining}\n"
+                f"   🕒 Time: {formatted_time}\n\n"
+            )
+            
+        response += "To add another reminder, use `/remind <time> <unit> <message>`"
         return response
 
     async def clear_reminders_command(
@@ -252,7 +340,7 @@ class ReminderModule(Module):
         args: List[str]
     ) -> str:
         """
-        Command handler for clearing reminders.
+        Command handler for clearing all reminders.
         
         Args:
             message: The message containing the command
@@ -261,18 +349,22 @@ class ReminderModule(Module):
         Returns:
             Response message
         """
-        user_id = message.user_id
+        # Get the user ID from metadata
+        user_id = message.metadata.get("user_id")
+        
+        if not user_id:
+            return "⚠️ Error: User information not available. Please try again."
         
         if user_id not in self._active_reminders or not self._active_reminders[user_id]:
             return "You don't have any active reminders to clear."
         
-        # Count the reminders
+        # Count reminders
         count = len(self._active_reminders[user_id])
         
         # Clear the reminders
         self._active_reminders[user_id] = []
         
-        return f"✅ Cleared {count} active reminders."
+        return f"✅ Cleared {count} reminder{'s' if count != 1 else ''}. Your reminder list is now empty."
 
     async def _set_reminder(
         self,
@@ -288,15 +380,11 @@ class ReminderModule(Module):
         Args:
             user_id: ID of the user
             conversation_id: ID of the conversation
-            platform: Platform of the conversation
+            platform: Platform the user is on
             task: Task to remind about
             reminder_time: Time to send the reminder
         """
-        # Initialize the user's reminder list if it doesn't exist
-        if user_id not in self._active_reminders:
-            self._active_reminders[user_id] = []
-        
-        # Create the reminder object
+        # Create the reminder
         reminder = {
             "user_id": user_id,
             "conversation_id": conversation_id,
@@ -306,77 +394,100 @@ class ReminderModule(Module):
             "created_at": datetime.datetime.now()
         }
         
-        # Add the reminder to the list
+        # Ensure the user has an entry in the reminders dict
+        if user_id not in self._active_reminders:
+            self._active_reminders[user_id] = []
+        
+        # Add the reminder
         self._active_reminders[user_id].append(reminder)
         
-        # Calculate the delay in seconds
+        # Calculate delay in seconds
         now = datetime.datetime.now()
         delay = (reminder_time - now).total_seconds()
         
         # Ensure the delay is positive
-        delay = max(delay, 0)
+        if delay <= 0:
+            delay = 1  # Send immediately if in the past
         
-        # Schedule the reminder
+        # Schedule the reminder with a task
         asyncio.create_task(self._handle_reminder(reminder, delay))
         
-        logger.info(
-            f"Set reminder for user {user_id}",
-            task=task,
-            delay_seconds=delay,
-            reminder_time=reminder_time.isoformat()
-        )
+        logger.info(f"Set reminder for user {user_id}: {task} at {reminder_time}")
 
     async def _handle_reminder(self, reminder: Dict[str, Any], delay: float) -> None:
         """
         Handle a scheduled reminder.
         
         Args:
-            reminder: The reminder object
+            reminder: The reminder to handle
             delay: Delay in seconds before sending the reminder
         """
+        # Sleep until it's time to send the reminder
+        await asyncio.sleep(delay)
+        
+        user_id = reminder["user_id"]
+        task = reminder["task"]
+        platform = reminder["platform"]
+        
         try:
-            # Wait for the specified delay
-            await asyncio.sleep(delay)
+            logger.info(f"Time reached for reminder to user {user_id}: {task}")
+            print(f"[DEBUG REMINDER] Sending reminder to user {user_id}: {task}")
             
-            # Get the user's active reminders
-            user_id = reminder["user_id"]
-            user_reminders = self._active_reminders.get(user_id, [])
-            
-            # Check if the reminder is still active
-            if reminder not in user_reminders:
-                logger.info(f"Reminder no longer active, skipping", user_id=user_id, task=reminder["task"])
-                return
-            
-            # Remove the reminder from the active list
-            user_reminders.remove(reminder)
-            
-            # Send the reminder based on the platform
-            platform = reminder["platform"]
-            task = reminder["task"]
-            
+            # Send reminder based on platform
             if platform == "telegram":
-                # Import telegram adapter here to avoid circular imports
                 from brainy.adapters.messengers import get_telegram_adapter
-                
-                telegram_adapter = get_telegram_adapter()
-                success = await telegram_adapter.send_reminder(user_id, task)
-                
-                if success:
-                    logger.info(f"Sent reminder to user {user_id} via Telegram", task=task)
-                else:
-                    logger.error(f"Failed to send reminder to user {user_id} via Telegram", task=task)
+                try:
+                    telegram_adapter = get_telegram_adapter()
+                    success = await telegram_adapter.send_reminder(user_id, task)
+                    
+                    if success:
+                        logger.info(f"Successfully delivered reminder to user {user_id}: {task}")
+                        print(f"[DEBUG REMINDER] Successfully delivered reminder to user {user_id}")
+                    else:
+                        logger.error(f"Failed to deliver reminder to user {user_id}: {task}")
+                        print(f"[DEBUG REMINDER] Failed to deliver reminder to user {user_id}")
+                except Exception as telegram_error:
+                    logger.error(f"Telegram error when sending reminder: {str(telegram_error)}", exc_info=True)
+                    print(f"[DEBUG REMINDER] Telegram error: {str(telegram_error)}")
             else:
                 logger.warning(f"Unsupported platform for sending reminders: {platform}")
+                print(f"[DEBUG REMINDER] Unsupported platform: {platform}")
+            
+            # Remove the reminder from active reminders regardless of delivery success
+            # This prevents failed reminders from being stuck
+            if user_id in self._active_reminders:
+                previous_count = len(self._active_reminders[user_id])
+                self._active_reminders[user_id] = [
+                    r for r in self._active_reminders[user_id] 
+                    if r.get("task") != task or r.get("time") != reminder["time"]
+                ]
+                new_count = len(self._active_reminders[user_id])
+                
+                removed = previous_count - new_count
+                logger.info(f"Removed {removed} reminder(s) for user {user_id}")
+                print(f"[DEBUG REMINDER] Removed {removed} reminder(s) for user {user_id}")
             
         except Exception as e:
-            logger.error(f"Error handling reminder: {e}", reminder=reminder, error=str(e))
+            logger.error(f"Error handling reminder: {e}", exc_info=True)
+            print(f"[DEBUG REMINDER] General error in reminder handling: {str(e)}")
+            
+            # Still try to remove the reminder to prevent it from being stuck
+            try:
+                if user_id in self._active_reminders:
+                    self._active_reminders[user_id] = [
+                        r for r in self._active_reminders[user_id] 
+                        if r.get("task") != task or r.get("time") != reminder["time"]
+                    ]
+                    logger.info(f"Removed reminder for user {user_id} after error")
+            except Exception as cleanup_error:
+                logger.error(f"Error cleaning up reminder after error: {cleanup_error}", exc_info=True)
 
 
 def create_reminder_module() -> ReminderModule:
     """
-    Create an instance of the reminder module.
+    Create a reminder module instance.
     
     Returns:
-        ReminderModule instance
+        A reminder module instance
     """
     return ReminderModule()

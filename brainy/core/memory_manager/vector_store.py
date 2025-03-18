@@ -39,6 +39,11 @@ class VectorStore:
         # Set the path to the ChromaDB directory
         self.db_path = db_path or settings.VECTOR_DB_PATH
         
+        # Convert to absolute path if it's relative
+        if not os.path.isabs(self.db_path):
+            self.db_path = os.path.abspath(self.db_path)
+            logger.debug(f"Converted vector DB path to absolute: {self.db_path}")
+        
         # Ensure the directory exists
         os.makedirs(self.db_path, exist_ok=True)
         
@@ -48,9 +53,8 @@ class VectorStore:
         # Initialize ChromaDB client
         self.client = chromadb.PersistentClient(path=self.db_path)
         
-        # Initialize the embedding function
-        # Use the local sentence-transformers embedding function with 384 dimensions
-        # instead of OpenAI embeddings with 1536 dimensions
+        # Initialize the embedding function - always use SentenceTransformer with 384 dimensions
+        logger.info(f"Initializing with SentenceTransformer embeddings (384 dimensions)")
         self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name="all-MiniLM-L6-v2"
         )
@@ -71,22 +75,42 @@ class VectorStore:
             logger.info(f"Using existing collection '{self.collection_name}'")
             return collection
         except Exception as e:
-            # If it doesn't exist or has incompatible dimensions, create a new one
-            # First, try to delete any existing collection with the same name
-            try:
-                self.client.delete_collection(name=self.collection_name)
-                logger.warning(f"Deleted existing collection '{self.collection_name}' due to potential embedding mismatch")
-            except Exception:
-                # Collection might not exist, which is fine
-                pass
+            error_str = str(e)
+            if "dimensionality" in error_str.lower():
+                # We have a dimension mismatch - this means the collection was created with different dimensions
+                logger.error(f"Dimension mismatch detected with collection '{self.collection_name}'.")
+                logger.error(f"The database was created with a different embedding model than the current 384-dimension model.")
+                logger.error(f"To resolve this, the existing collection needs to be deleted and recreated.")
+                
+                # Try to delete the incompatible collection and create a new one
+                try:
+                    logger.warning(f"Deleting incompatible collection '{self.collection_name}'...")
+                    self.client.delete_collection(name=self.collection_name)
+                    logger.info(f"Successfully deleted incompatible collection.")
+                    
+                    # Create a new collection with the correct dimensions
+                    collection = self.client.create_collection(
+                        name=self.collection_name,
+                        embedding_function=self.embedding_function
+                    )
+                    logger.info(f"Created new collection '{self.collection_name}' with 384-dimensional embeddings")
+                    return collection
+                except Exception as del_e:
+                    logger.error(f"Failed to delete/recreate incompatible collection: {del_e}")
+                    raise Exception(f"Cannot continue with incompatible vector database. Please manually delete the data/vectordb directory and restart.")
             
-            # Create a new collection
-            collection = self.client.create_collection(
-                name=self.collection_name,
-                embedding_function=self.embedding_function
-            )
-            logger.info(f"Created new collection '{self.collection_name}'")
-            return collection
+            # If the collection doesn't exist or there's another non-dimension error, create a new one
+            logger.info(f"Creating new collection '{self.collection_name}'")
+            try:
+                collection = self.client.create_collection(
+                    name=self.collection_name,
+                    embedding_function=self.embedding_function
+                )
+                logger.info(f"Created new collection '{self.collection_name}'")
+                return collection
+            except Exception as create_e:
+                logger.error(f"Error creating collection: {create_e}")
+                raise
     
     async def add_document(
         self,
@@ -98,29 +122,34 @@ class VectorStore:
         Add a document to the vector store.
         
         Args:
-            text: Text content of the document
-            metadata: Optional metadata for the document
-            document_id: Optional ID for the document. Will be generated if not provided.
+            text: Text of the document
+            metadata: Optional metadata to associate with the document
+            document_id: Optional ID for the document, generated if not provided
             
         Returns:
-            The ID of the added document
+            ID of the added document
         """
-        # Generate an ID if not provided
-        doc_id = document_id or str(uuid.uuid4())
+        # Generate document ID if not provided
+        if document_id is None:
+            document_id = str(uuid.uuid4())
+        
+        # Add document to collection
+        collection = self._get_or_create_collection()
         
         try:
-            # Add the document to the collection (the embedding will be generated automatically)
-            self.collection.add(
+            logger.info(f"Adding document to vector store: id={document_id}, length={len(text)}, metadata={metadata}")
+            
+            # Add the document
+            collection.add(
                 documents=[text],
                 metadatas=[metadata or {}],
-                ids=[doc_id]
+                ids=[document_id]
             )
             
-            logger.debug(f"Added document to vector store", document_id=doc_id)
-            
-            return doc_id
+            logger.info(f"Successfully added document to vector store: {document_id}")
+            return document_id
         except Exception as e:
-            logger.error(f"Error adding document to vector store: {e}")
+            logger.error(f"Error adding document to vector store: {str(e)}")
             raise
     
     def query(
@@ -134,37 +163,45 @@ class VectorStore:
         
         Args:
             query_text: Text to find similar documents for
-            filter_metadata: Optional metadata filter to apply
+            filter_metadata: Optional metadata filter
             limit: Maximum number of results to return
             
         Returns:
-            List of matching documents with their metadata and distances
+            List of documents with their text, metadata, and distance
         """
+        collection = self._get_or_create_collection()
+        
         try:
-            # Use the embedding function to get embeddings for the query
-            results = self.collection.query(
+            logger.info(f"Querying vector store: query='{query_text[:50]}...', filter={filter_metadata}, limit={limit}")
+            
+            # Query the collection
+            results = collection.query(
                 query_texts=[query_text],
                 n_results=limit,
                 where=filter_metadata
             )
             
-            # Process results
+            # Format the results
             documents = []
-            if results["documents"] and results["documents"][0]:
-                for i, doc in enumerate(results["documents"][0]):
-                    document = {
+            if results and results.get("documents"):
+                docs = results["documents"][0]
+                metadatas = results["metadatas"][0]
+                distances = results["distances"][0]
+                ids = results["ids"][0]
+                
+                for i, (doc, metadata, distance, doc_id) in enumerate(zip(docs, metadatas, distances, ids)):
+                    documents.append({
+                        "id": doc_id,
                         "text": doc,
-                        "id": results["ids"][0][i] if results["ids"] and results["ids"][0] else None,
-                        "metadata": results["metadatas"][0][i] if results["metadatas"] and results["metadatas"][0] else {},
-                        "distance": results["distances"][0][i] if results["distances"] and results["distances"][0] else None
-                    }
-                    documents.append(document)
+                        "metadata": metadata,
+                        "distance": distance
+                    })
             
-            logger.debug(f"Query returned {len(documents)} results")
+            logger.info(f"Vector store query returned {len(documents)} results")
             
             return documents
         except Exception as e:
-            logger.error(f"Error querying vector store: {e}")
+            logger.error(f"Error querying vector store: {str(e)}")
             return []
     
     def delete_document(self, document_id: str) -> bool:
