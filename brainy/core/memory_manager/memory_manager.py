@@ -1,66 +1,80 @@
 """
 Memory manager for Brainy.
+
+This module handles conversation memory management including storing, retrieving,
+and searching conversation history.
 """
-from typing import Dict, List, Optional, Any
-from datetime import datetime
+import sys
 import uuid
-import json
+from typing import Dict, List, Any, Optional
+from datetime import datetime
+from enum import Enum
 
 from brainy.utils.logging import get_logger
 from brainy.adapters.ai_providers.base import Message
 from brainy.core.memory_manager.vector_store import get_vector_store
 
+# Add custom debug logging if available
+try:
+    sys.path.append(".")  # Add project root to path
+    import debug_logging
+    debug_log = True
+except ImportError:
+    debug_log = False
+
 # Initialize logger
 logger = get_logger(__name__)
 
 
+class MessageRole(str, Enum):
+    """Enumeration of message roles."""
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+
+
 class ConversationMessage:
-    """Representation of a message in a conversation."""
+    """
+    Represents a message in a conversation.
+    """
     
     def __init__(
         self,
-        user_id: str,
-        role: str,
+        role: MessageRole,
         content: str,
-        conversation_id: str,
-        platform: str,
+        metadata: Optional[Dict[str, Any]] = None,
         message_id: Optional[str] = None,
-        timestamp: Optional[datetime] = None,
-        vector_id: Optional[str] = None
+        timestamp: Optional[datetime] = None
     ):
         """
         Initialize a conversation message.
         
         Args:
-            user_id: ID of the user who sent or received the message
-            role: Role of the message sender (user, assistant, system)
+            role: Role of the message sender (USER, ASSISTANT, SYSTEM)
             content: Content of the message
-            conversation_id: ID of the conversation
-            platform: Platform where the message was sent
-            message_id: Optional ID for the message. Will be generated if not provided.
-            timestamp: Optional timestamp for the message. Current time will be used if not provided.
-            vector_id: Optional ID for the message in the vector store.
+            metadata: Optional metadata about the message
+            message_id: Optional ID for the message, will be generated if not provided
+            timestamp: Optional timestamp for the message, will use current time if not provided
         """
-        self.user_id = user_id
         self.role = role
         self.content = content
-        self.conversation_id = conversation_id
-        self.platform = platform
+        self.metadata = metadata or {}
         self.message_id = message_id or str(uuid.uuid4())
         self.timestamp = timestamp or datetime.now()
-        self.vector_id = vector_id
-    
+        
     def to_dict(self) -> Dict[str, Any]:
-        """Convert message to dictionary representation."""
+        """
+        Convert the message to a dictionary.
+        
+        Returns:
+            Dictionary representation of the message
+        """
         return {
-            "message_id": self.message_id,
-            "user_id": self.user_id,
             "role": self.role,
             "content": self.content,
-            "conversation_id": self.conversation_id,
-            "platform": self.platform,
-            "timestamp": self.timestamp.isoformat(),
-            "vector_id": self.vector_id
+            "metadata": self.metadata,
+            "message_id": self.message_id,
+            "timestamp": self.timestamp.isoformat()
         }
     
     def to_ai_message(self) -> Message:
@@ -69,67 +83,86 @@ class ConversationMessage:
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ConversationMessage':
-        """Create a message from dictionary data."""
-        timestamp = data.get("timestamp")
-        if timestamp and isinstance(timestamp, str):
-            timestamp = datetime.fromisoformat(timestamp)
+        """
+        Create a message from a dictionary.
+        
+        Args:
+            data: Dictionary representation of the message
+            
+        Returns:
+            ConversationMessage instance
+        """
+        timestamp = None
+        if "timestamp" in data:
+            if isinstance(data["timestamp"], str):
+                timestamp = datetime.fromisoformat(data["timestamp"])
+            elif isinstance(data["timestamp"], datetime):
+                timestamp = data["timestamp"]
         
         return cls(
-            user_id=data["user_id"],
             role=data["role"],
             content=data["content"],
-            conversation_id=data["conversation_id"],
-            platform=data["platform"],
-            message_id=data["message_id"],
-            timestamp=timestamp,
-            vector_id=data.get("vector_id")
+            metadata=data.get("metadata", {}),
+            message_id=data.get("message_id"),
+            timestamp=timestamp
         )
 
 
 class MemoryManager:
     """
-    Memory manager for storing and retrieving conversation history.
+    Manages conversation memory.
     
-    This implementation uses an in-memory store for recent messages and
-    ChromaDB for vector search capabilities.
+    This class is responsible for:
+    - Storing conversation messages in memory
+    - Retrieving conversation history
+    - Searching for similar messages
     """
     
     def __init__(self):
         """Initialize the memory manager."""
-        # In-memory storage of messages by conversation ID
-        self._messages: Dict[str, List[ConversationMessage]] = {}
-        
-        # Mapping of user IDs to conversation IDs
-        self._user_conversations: Dict[str, List[str]] = {}
+        # In-memory storage for now
+        self._messages: Dict[str, ConversationMessage] = {}
+        self._conversation_messages: Dict[str, List[str]] = {}
         
         # Get the vector store
         self._vector_store = get_vector_store("messages")
         
-        logger.info("Initialized memory manager with vector store")
-    
+        if debug_log:
+            debug_logging.log_conversation("Memory manager initialized")
+        
     async def add_message(self, message: ConversationMessage) -> str:
         """
-        Add a message to the conversation history.
+        Add a message to memory.
         
         Args:
-            message: The message to add
+            message: Message to add
             
         Returns:
-            The ID of the added message
+            ID of the added message
         """
-        # Initialize conversation list if it doesn't exist
-        if message.conversation_id not in self._messages:
-            self._messages[message.conversation_id] = []
+        # Get conversation ID from metadata
+        conversation_id = message.metadata.get("conversation_id")
+        if not conversation_id:
+            # If no conversation ID, use user ID and platform as fallback
+            user_id = message.metadata.get("user_id")
+            platform = message.metadata.get("platform")
+            if user_id and platform:
+                conversation_id = f"{platform}:{user_id}"
+            else:
+                raise ValueError("Message must have either conversation_id or both user_id and platform in metadata")
         
-        # Add the message to the in-memory store
-        self._messages[message.conversation_id].append(message)
+        # Store message
+        message_id = message.message_id
+        self._messages[message_id] = message
         
-        # Update user conversations mapping
-        if message.user_id not in self._user_conversations:
-            self._user_conversations[message.user_id] = []
+        # Add to conversation index
+        if conversation_id not in self._conversation_messages:
+            self._conversation_messages[conversation_id] = []
+        self._conversation_messages[conversation_id].append(message_id)
         
-        if message.conversation_id not in self._user_conversations[message.user_id]:
-            self._user_conversations[message.user_id].append(message.conversation_id)
+        if debug_log:
+            user_id = message.metadata.get("user_id", "unknown")
+            debug_logging.log_conversation(f"Added message from user {user_id} to conversation {conversation_id}")
         
         # Add the message to the vector store if it's a user or assistant message
         # We don't store system messages in the vector store
@@ -138,10 +171,10 @@ class MemoryManager:
                 # Prepare metadata for the vector store
                 metadata = {
                     "message_id": message.message_id,
-                    "user_id": message.user_id,
+                    "user_id": message.metadata.get("user_id"),
                     "role": message.role,
-                    "conversation_id": message.conversation_id,
-                    "platform": message.platform,
+                    "conversation_id": conversation_id,
+                    "platform": message.metadata.get("platform"),
                     "timestamp": message.timestamp.isoformat()
                 }
                 
@@ -153,7 +186,7 @@ class MemoryManager:
                 )
                 
                 # Update the message with the vector ID
-                message.vector_id = vector_id
+                message.metadata["vector_id"] = vector_id
                 
                 logger.debug(
                     f"Added message to vector store",
@@ -163,15 +196,7 @@ class MemoryManager:
             except Exception as e:
                 logger.error(f"Error adding message to vector store: {e}")
         
-        logger.debug(
-            f"Added message to conversation",
-            user_id=message.user_id,
-            conversation_id=message.conversation_id,
-            role=message.role,
-            message_id=message.message_id
-        )
-        
-        return message.message_id
+        return message_id
     
     async def get_conversation_history(
         self,
@@ -182,24 +207,29 @@ class MemoryManager:
         Get the conversation history for a conversation.
         
         Args:
-            conversation_id: ID of the conversation
-            limit: Optional limit on the number of messages to return (most recent)
+            conversation_id: ID of the conversation to get history for
+            limit: Optional maximum number of messages to retrieve
             
         Returns:
-            List of messages in the conversation
+            List of messages in the conversation, ordered by timestamp
         """
-        if conversation_id not in self._messages:
+        if conversation_id not in self._conversation_messages:
+            if debug_log:
+                debug_logging.log_conversation(f"No messages found for conversation {conversation_id}")
             return []
         
-        # Get all messages for the conversation
-        messages = self._messages[conversation_id]
+        message_ids = self._conversation_messages[conversation_id]
+        messages = [self._messages[msg_id] for msg_id in message_ids if msg_id in self._messages]
         
-        # Sort by timestamp (newest last)
-        messages = sorted(messages, key=lambda m: m.timestamp)
+        # Sort by timestamp
+        messages.sort(key=lambda msg: msg.timestamp)
         
         # Apply limit if specified
         if limit is not None:
             messages = messages[-limit:]
+        
+        if debug_log:
+            debug_logging.log_conversation(f"Retrieved {len(messages)} messages for conversation {conversation_id}")
         
         return messages
     
@@ -213,7 +243,7 @@ class MemoryManager:
         Returns:
             List of conversation IDs for the user
         """
-        return self._user_conversations.get(user_id, [])
+        return [conv_id for conv_id, user_conversations in self._conversation_messages.items() if user_id in user_conversations]
     
     async def clear_conversation(self, conversation_id: str) -> None:
         """
@@ -222,9 +252,9 @@ class MemoryManager:
         Args:
             conversation_id: ID of the conversation to clear
         """
-        if conversation_id in self._messages:
+        if conversation_id in self._conversation_messages:
             # Get the messages to remove from the vector store
-            messages = self._messages[conversation_id]
+            messages = self.get_conversation_history(conversation_id)
             
             # Remove messages from the vector store
             try:
@@ -235,7 +265,8 @@ class MemoryManager:
                 logger.error(f"Error deleting messages from vector store: {e}")
             
             # Clear the in-memory messages
-            self._messages[conversation_id] = []
+            self._messages = {}
+            self._conversation_messages[conversation_id] = []
             
             logger.info(f"Cleared conversation {conversation_id}")
     
@@ -264,16 +295,11 @@ class MemoryManager:
             return user_conversations[0]
         
         # Create a new conversation ID
-        conversation_id = f"{user_id}_{platform}_{uuid.uuid4()}"
+        conversation_id = f"{platform}:{user_id}"
         
         # Initialize the conversation
-        self._messages[conversation_id] = []
-        
-        # Update user conversations mapping
-        if user_id not in self._user_conversations:
-            self._user_conversations[user_id] = []
-        
-        self._user_conversations[user_id].append(conversation_id)
+        self._messages = {}
+        self._conversation_messages[conversation_id] = []
         
         logger.info(f"Created new conversation {conversation_id} for user {user_id}")
         
@@ -342,12 +368,8 @@ class MemoryManager:
                     continue
                 
                 # Find the message in the in-memory store
-                conv_id = doc["metadata"].get("conversation_id")
-                if conv_id and conv_id in self._messages:
-                    for msg in self._messages[conv_id]:
-                        if msg.message_id == message_id:
-                            messages.append(msg)
-                            break
+                if message_id in self._messages:
+                    messages.append(self._messages[message_id])
             
             logger.debug(
                 f"Found {len(messages)} similar messages",
@@ -370,10 +392,11 @@ def get_memory_manager() -> MemoryManager:
     Get the memory manager instance.
     
     Returns:
-        The memory manager instance
+        MemoryManager instance
     """
     global _memory_manager
+    
     if _memory_manager is None:
         _memory_manager = MemoryManager()
-    
+        
     return _memory_manager 

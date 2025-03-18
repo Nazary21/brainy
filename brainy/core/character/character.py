@@ -239,6 +239,22 @@ class CharacterManager:
         
         logger.info(f"Added/updated character '{character.name}'")
     
+    def get_character_for_conversation(self, conversation_id: str) -> Character:
+        """
+        Get the character associated with a conversation.
+        
+        Args:
+            conversation_id: ID of the conversation
+            
+        Returns:
+            The character associated with the conversation,
+            or the default character if none is specifically assigned
+        """
+        # For now, we don't have conversation-specific character storage
+        # In the future, this could be extended to get conversation-specific characters
+        # from a database or other storage
+        return self.get_default_character()
+    
     def set_default_character(self, character_id: str) -> bool:
         """
         Set the default character.

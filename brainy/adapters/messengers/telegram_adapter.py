@@ -4,8 +4,10 @@ Telegram adapter for Brainy.
 This module provides integration with the Telegram API for sending and receiving messages.
 """
 import asyncio
+import sys
 from typing import Optional, Dict, Any, List, Callable
 import logging
+import traceback
 
 from telegram import Update, Bot, BotCommand
 from telegram.ext import (
@@ -24,8 +26,28 @@ from brainy.core.character import get_character_manager
 from brainy.core.modules import get_module_manager, ModuleManager
 from brainy.core.memory_manager import ConversationMessage
 
+# Add custom debug logging if available
+try:
+    sys.path.append(".")  # Add project root to path
+    import debug_logging
+    debug_log = True
+except ImportError:
+    debug_log = False
+
 # Initialize logger
 logger = get_logger(__name__)
+
+# Debug logging function
+def debug(component, message):
+    if debug_log:
+        if component == "telegram":
+            debug_logging.log_telegram(message)
+        elif component == "module":
+            debug_logging.log_module(message)
+        else:
+            debug_logging.get_logger().info(f"{component} | {message}")
+    # Also log at debug level in standard logger
+    logger.debug(message)
 
 
 class TelegramAdapter:
@@ -48,6 +70,8 @@ class TelegramAdapter:
         self.token = token
         self.application: Optional[Application] = None
         self.bot: Optional[Bot] = None
+        self._is_setup = False  # Track if setup has been completed
+        self._polling_task = None  # Task for polling
         
         # Get the conversation handler
         self._conversation_handler = conversation_handler or get_conversation_handler()
@@ -65,9 +89,12 @@ class TelegramAdapter:
         self._user_chat_map: Dict[str, int] = {}
         
         logger.info("Initialized Telegram adapter")
+        debug("telegram", "Telegram adapter initialized")
     
     async def setup(self) -> None:
         """Set up the Telegram bot and register handlers."""
+        debug("telegram", "Setting up Telegram bot handlers...")
+        
         # Create the application
         self.application = Application.builder().token(self.token).build()
         
@@ -94,11 +121,17 @@ class TelegramAdapter:
         # Set up bot commands
         await self._setup_commands()
         
+        # Mark setup as complete
+        self._is_setup = True
+        
         logger.info("Set up Telegram bot handlers")
+        debug("telegram", "Telegram bot handlers setup complete")
     
     async def _setup_commands(self) -> None:
         """Set up commands for the Telegram bot."""
         try:
+            debug("telegram", "Setting up bot commands...")
+            
             # Create a list of commands to register
             commands = [
                 BotCommand(command="start", description="Start a conversation with the bot"),
@@ -124,10 +157,15 @@ class TelegramAdapter:
             try:
                 await self.bot.set_my_commands(commands)
                 logger.info(f"Set up {len(commands)} bot commands")
+                debug("telegram", f"Registered {len(commands)} bot commands successfully")
             except Exception as e:
                 logger.error(f"Failed to set bot commands: {e}")
+                if debug_log:
+                    debug_logging.log_error("TELEGRAM", f"Failed to set bot commands: {e}", exc_info=True)
         except Exception as e:
             logger.error(f"Error setting up commands: {e}")
+            if debug_log:
+                debug_logging.log_error("TELEGRAM", f"Error setting up commands: {e}", exc_info=True)
     
     def _get_all_module_commands(self) -> Dict[str, Any]:
         """Get all module commands."""
@@ -143,28 +181,149 @@ class TelegramAdapter:
     
     async def start(self) -> None:
         """Start the Telegram bot."""
+        logger.info("Starting Telegram bot")
+        debug("telegram", "Starting Telegram bot...")
+        
+        # Set up handlers and commands if needed
+        if not self._is_setup:
+            debug("telegram", "Bot not set up yet, initializing...")
+            await self.setup()
+        
         try:
-            if self.application is None:
-                await self.setup()
-            
             # Initialize the application
+            debug("telegram", "Initializing application...")
             await self.application.initialize()
             
-            # Start polling in a background task
-            logger.info("Starting Telegram bot polling...")
+            # Start the polling process in a separate task
+            debug("telegram", "Creating polling task...")
+            self._polling_task = asyncio.create_task(self._start_polling())
             
-            async with self.application:
-                await self.application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-                logger.info("Telegram bot is now listening for messages")
-                
-                # Keep the task running
-                while True:
-                    await asyncio.sleep(1)
+            logger.info("Telegram bot started")
+            debug("telegram", "Telegram bot started successfully")
         except Exception as e:
-            logger.error(f"Failed to start Telegram bot: {e}", exc_info=True)
-            # Try to restart after a delay if there was an error
-            asyncio.create_task(self._delayed_restart(10))
-    
+            logger.error(f"Failed to start Telegram bot: {str(e)}", exc_info=True)
+            if debug_log:
+                debug_logging.log_error("TELEGRAM", f"Failed to start Telegram bot: {str(e)}", exc_info=True)
+            # Try to restart after a delay
+            await self._delayed_restart(10)
+
+    async def _start_polling(self) -> None:
+        """Start polling for updates."""
+        try:
+            # Delete any existing webhook to ensure polling works
+            print("[DEBUG] Deleting any existing webhook...")
+            debug("telegram", "Deleting any existing webhook to ensure polling works")
+            await self.bot.delete_webhook(drop_pending_updates=False)
+            print("[DEBUG] Webhook deleted successfully")
+            
+            # Force update the handlers registry to ensure our handlers are registered
+            print("[DEBUG] Refreshing handlers registry...")
+            self.application.update_persistence()
+            print("[DEBUG] Handlers registry refreshed")
+            
+            # Debug helper to see all updates
+            async def process_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+                update_str = str(update)
+                debug("telegram", f"RAW UPDATE RECEIVED: {update_str}")
+                # Print to stdout as well to ensure we're seeing it
+                print(f"\n[TELEGRAM RAW UPDATE] {update_str}\n")
+                
+                # Log update details
+                update_type = "unknown"
+                if update.message:
+                    update_type = "message"
+                    debug("telegram", f"Message text: '{update.message.text}'")
+                    debug("telegram", f"From user ID: {update.effective_user.id}")
+                elif update.edited_message:
+                    update_type = "edited_message"
+                elif update.callback_query:
+                    update_type = "callback_query"
+                
+                debug("telegram", f"Update type: {update_type}")
+                print(f"[DEBUG] Processing update of type: {update_type}")
+            
+            # Add a handler that will catch all updates for debugging with highest priority
+            print("[DEBUG] Registering ALL-UPDATES debug handler...")
+            self.application.add_handler(MessageHandler(filters.ALL, process_update), group=-999)
+            print(f"[DEBUG] Handlers registered: {len(self.application.handlers)}")
+            
+            # Add a direct print of the first few handlers for debugging
+            for group_id, handlers_group in list(self.application.handlers.items())[:2]:
+                print(f"[DEBUG] Handler group {group_id}: {len(handlers_group)} handlers")
+                for handler in handlers_group[:2]:  # Only show first 2 per group
+                    print(f"[DEBUG]   - {handler.__class__.__name__}")
+            
+            # Start polling in a non-blocking way
+            debug("telegram", "Starting polling...")
+            print("[DEBUG] Starting Telegram polling now...")
+            
+            # Configure polling with more debugging
+            print("[DEBUG] Starting updater with these settings:")
+            print("[DEBUG]   - allowed_updates: ALL_TYPES")
+            print("[DEBUG]   - drop_pending_updates: False")
+            print("[DEBUG]   - read_timeout: 30s")
+            
+            # START THE APPLICATION - this is critical for v21.x
+            # This starts the process that takes updates from the queue and sends them to handlers
+            print("[DEBUG] Starting application to process updates...")
+            await self.application.start()
+            print("[DEBUG] Application started successfully")
+            
+            # Now start the updater to fetch updates
+            await self.application.updater.start_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=False,
+                read_timeout=30,
+                write_timeout=30,
+                connect_timeout=30,
+                pool_timeout=30,
+                bootstrap_retries=5
+            )
+            
+            logger.info("[DEBUG] Polling started successfully, waiting for messages...")
+            debug("telegram", "Polling started successfully, waiting for messages...")
+            print("[DEBUG] Telegram polling is active and waiting for messages...")
+            bot_info = await self.bot.get_me()
+            print(f"[DEBUG] Bot info: {bot_info.first_name} (@{bot_info.username}) ID:{bot_info.id}")
+            
+            # Keep the task alive
+            while True:
+                await asyncio.sleep(10)
+                print(f"[DEBUG] Still polling for Telegram updates as @{self.bot.username}...")
+                debug("telegram", f"Still polling for updates as @{self.bot.username}")
+                
+                # Try to peek at the update queue to see if there's anything there
+                try:
+                    queue_size = self.application.update_queue.qsize()
+                    print(f"[DEBUG] Update queue size: {queue_size}")
+                    if queue_size > 0:
+                        print("[DEBUG] There are updates in the queue that are not being processed!")
+                except Exception as e:
+                    print(f"[DEBUG] Could not check queue size: {e}")
+                
+        except Exception as e:
+            logger.error(f"Error in Telegram polling: {str(e)}", exc_info=True)
+            print(f"[DEBUG] CRITICAL ERROR IN POLLING: {str(e)}")
+            print(f"[DEBUG] Full error: {traceback.format_exc()}")
+            if debug_log:
+                debug_logging.log_error("TELEGRAM", f"Error in Telegram polling: {str(e)}", exc_info=True)
+            # Try to restart after a delay
+            await self._delayed_restart(10)
+        finally:
+            # Ensure application and updater are both stopped correctly
+            if self.application is not None:
+                print("[DEBUG] Stopping application and updater...")
+                try:
+                    await self.application.stop()
+                    if hasattr(self.application, 'updater'):
+                        await self.application.updater.stop()
+                    print("[DEBUG] Application and updater stopped successfully")
+                except Exception as e:
+                    print(f"[DEBUG] Error stopping application: {e}")
+            
+            logger.info("Telegram polling stopped")
+            debug("telegram", "Telegram polling stopped")
+
     async def _delayed_restart(self, delay_seconds: int) -> None:
         """Attempt to restart the bot after a delay."""
         logger.info(f"Will attempt to restart Telegram bot in {delay_seconds} seconds")
@@ -178,12 +337,45 @@ class TelegramAdapter:
             await self.start()
         except Exception as e:
             logger.error(f"Failed to restart Telegram bot: {e}")
-    
+
     async def stop(self) -> None:
         """Stop the Telegram bot."""
+        logger.info("Stopping Telegram bot")
+        print("[DEBUG] Stopping Telegram bot...")
+        
+        # Cancel the polling task if it's running
+        if hasattr(self, '_polling_task') and self._polling_task is not None:
+            print("[DEBUG] Cancelling polling task...")
+            self._polling_task.cancel()
+            try:
+                await self._polling_task
+            except asyncio.CancelledError:
+                pass
+            self._polling_task = None
+            print("[DEBUG] Polling task cancelled")
+        
+        # Stop the application if it's running
         if self.application is not None:
-            await self.application.stop()
-            logger.info("Stopped Telegram bot")
+            try:
+                # In v21.x, the order is important: first stop the updater, then the application
+                print("[DEBUG] Stopping application...")
+                
+                # Stop the updater if it's running
+                if hasattr(self.application, 'updater'):
+                    print("[DEBUG] Stopping updater...")
+                    await self.application.updater.stop()
+                    print("[DEBUG] Updater stopped")
+                
+                # Shutdown the application
+                await self.application.stop()
+                print("[DEBUG] Application stopped")
+                
+                logger.info("Telegram bot stopped")
+            except Exception as e:
+                logger.error(f"Error stopping Telegram bot: {str(e)}", exc_info=True)
+                print(f"[DEBUG] Error stopping Telegram bot: {str(e)}")
+                if debug_log:
+                    debug_logging.log_error("TELEGRAM", f"Error stopping Telegram bot: {str(e)}", exc_info=True)
     
     async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle the /start command."""
@@ -317,201 +509,124 @@ class TelegramAdapter:
         await context.bot.send_message(chat_id=chat_id, text=character_list)
     
     async def _module_command_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle commands that might be from modules.
-        
-        Args:
-            update: Update from Telegram
-            context: Context from Telegram
-        """
-        if update.effective_chat is None or update.effective_user is None or update.message is None:
+        """Handle commands that are processed by modules."""
+        if not update.effective_user or not update.message or not update.message.text or not update.effective_chat:
+            logger.warning("Received command without required data")
+            debug("telegram", "Received command without required data")
             return
         
         user_id = str(update.effective_user.id)
-        chat_id = update.effective_chat.id
         message_text = update.message.text
+        chat_id = update.effective_chat.id
         
-        if not message_text:
-            return
+        logger.info(f"Processing module command from user {user_id}: {message_text}")
+        debug("telegram", f"Processing module command from user {user_id}: {message_text}")
         
-        # Store the user's chat ID for reminders
+        # Store the chat ID for this user (used for sending messages later)
         self._user_chat_map[user_id] = chat_id
+        debug("telegram", f"Stored chat ID {chat_id} for user {user_id}")
         
-        # Parse the command
-        command, args = self._module_manager.parse_command(message_text)
-        
-        # Get all module commands
-        module_commands = self._get_all_module_commands()
-        
-        # Check if this command is handled by a module
-        if command in module_commands:
-            module, handler_info = module_commands[command]
+        try:
+            # Parse the command
+            command, args = self._module_manager.parse_command(message_text)
             
-            # Get the handler function - it could be either directly a callable or in a dictionary
-            if callable(handler_info):
-                handler = handler_info
-            elif isinstance(handler_info, dict) and 'handler' in handler_info:
-                handler = handler_info['handler']
-            else:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"Error: Invalid command handler configuration for /{command}"
-                )
-                return
+            # Get all module commands
+            all_module_commands = self._get_all_module_commands()
             
-            # Create a conversation message object
-            message = ConversationMessage(
-                message_id=str(update.message.message_id),
-                conversation_id=f"{user_id}:{self._platform_name}",
-                user_id=user_id,
-                content=message_text,
-                role="user",
-                timestamp=update.message.date.timestamp(),
-                platform=self._platform_name,
-                metadata={
-                    "telegram_chat_id": chat_id,
-                    "telegram_message_id": update.message.message_id,
-                    "telegram_user": {
-                        "id": update.effective_user.id,
-                        "username": update.effective_user.username,
-                        "first_name": update.effective_user.first_name,
-                        "last_name": update.effective_user.last_name
-                    }
-                }
-            )
-            
-            try:
-                # Indicate that the bot is typing
+            # Check if the command is handled by a module
+            if command in all_module_commands:
+                # Show typing indicator
                 await context.bot.send_chat_action(chat_id=chat_id, action="typing")
                 
-                # Call the handler
-                response = await handler(message, args)
+                # Create a conversation message object
+                conv_message = ConversationMessage(
+                    user_id=user_id,
+                    role="user",
+                    content=message_text,
+                    conversation_id=f"{user_id}:telegram",
+                    platform="telegram"
+                )
+                
+                # Process the command with the module manager
+                response = await self._module_manager.process_command(conv_message)
                 
                 if response:
-                    # Send the response
                     await context.bot.send_message(chat_id=chat_id, text=response)
-            except Exception as e:
-                logger.error(f"Error handling module command: {e}", user_id=user_id, platform=self._platform_name)
+                    logger.info(f"Sent module command response to user {user_id}")
+                    debug("telegram", f"Sent module command response to user {user_id}")
+                else:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="I'm sorry, I couldn't process that command."
+                    )
+            else:
+                logger.warning(f"Unknown command: {command}")
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"Sorry, there was an error processing your command: {str(e)}"
+                    text=f"Unknown command: {command}. Type /help to see available commands."
                 )
-        else:
-            # Command not found
+        except Exception as e:
+            logger.error(f"Error processing module command: {str(e)}", exc_info=True)
+            if debug_log:
+                debug_logging.log_error("TELEGRAM", f"Error processing module command: {str(e)}", exc_info=True)
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"Unknown command: {command}. Use /help to see available commands."
+                text="I'm sorry, I encountered an error while processing your command. Please try again later."
             )
     
     async def _message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle regular text messages."""
-        if update.effective_chat is None or update.effective_user is None or update.message is None:
-            logger.warning("Received message with missing chat, user, or message information")
+        """Handle regular messages."""
+        # Ensure we have all the required data
+        if not update.effective_user or not update.message or not update.message.text or not update.effective_chat:
+            logger.warning("Received message without required data")
+            debug("telegram", "Received message without required data")
             return
         
         user_id = str(update.effective_user.id)
-        chat_id = update.effective_chat.id
         message_text = update.message.text
+        chat_id = update.effective_chat.id
         
-        if not message_text:
-            logger.warning(f"Received empty message from user {user_id}")
-            return
-        
-        # TEMPORARY DEBUG RESPONSE - Remove after testing
-        await context.bot.send_message(chat_id=chat_id, text=f"DEBUG: I received your message: '{message_text}'")
-        
-        # Log the incoming message
-        logger.info(
-            f"Received message from user {user_id}: '{message_text}'",
-            user_id=user_id,
-            platform=self._platform_name
-        )
-        
-        # Store the user's chat ID for reminders
-        self._user_chat_map[user_id] = chat_id
-        
-        # Prepare metadata
-        metadata = {
-            "telegram_chat_id": chat_id,
-            "telegram_message_id": update.message.message_id,
-            "telegram_user": {
-                "id": update.effective_user.id,
-                "username": update.effective_user.username,
-                "first_name": update.effective_user.first_name,
-                "last_name": update.effective_user.last_name
-            }
-        }
-        
-        logger.debug(f"Created metadata for message from user {user_id}")
-        
-        # Create a conversation message object for module processing
-        message = ConversationMessage(
-            message_id=str(update.message.message_id),
-            conversation_id=f"{user_id}:{self._platform_name}",
-            user_id=user_id,
-            content=message_text,
-            role="user",
-            timestamp=update.message.date.timestamp(),
-            platform=self._platform_name,
-            metadata=metadata
-        )
-        
-        logger.debug(f"Created conversation message object for user {user_id}")
-        
-        # Check if any module can handle this message based on trigger patterns
-        module_response = None
-        for module in self._module_manager.get_enabled_modules():
-            logger.debug(f"Checking if module {module.module_id} can process message")
-            if module.matches_message(message_text):
-                logger.info(f"Module {module.module_id} matched message pattern")
-                try:
-                    # Call the module's process method
-                    logger.debug(f"Processing message with module {module.module_id}")
-                    module_response = await module.process_message(
-                        message, 
-                        {"telegram_adapter": self}
-                    )
-                    if module_response:
-                        logger.info(f"Module {module.module_id} provided a response")
-                        break
-                except Exception as e:
-                    logger.error(f"Error in module processing: {e}", exc_info=True, module_id=module.module_id)
-        
-        # If a module handled it, send the response and return
-        if module_response:
-            logger.info(f"Sending module response to user {user_id}")
-            await context.bot.send_message(chat_id=chat_id, text=module_response)
-            return
-        
-        # Indicate that the bot is typing
-        try:
-            logger.debug(f"Sending typing action to chat {chat_id}")
-            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-        except Exception as e:
-            logger.error(f"Error sending typing action: {e}", exc_info=True)
+        logger.info(f"Received message from user {user_id}: '{message_text}'")
+        debug("telegram", f"RECEIVED MESSAGE from user {user_id}: '{message_text}'")
         
         try:
-            # Process the message and get a response
-            logger.info(f"Processing message with conversation handler for user {user_id}")
+            # Show typing indicator
+            debug("telegram", f"Sending typing indicator to chat {chat_id}")
+            await context.bot.send_chat_action(
+                chat_id=chat_id, 
+                action="typing"
+            )
+            
+            # Store the chat ID for this user (used for sending messages later)
+            self._user_chat_map[user_id] = chat_id
+            debug("telegram", f"Stored chat ID {chat_id} for user {user_id}")
+            
+            # SIMPLIFIED APPROACH: Direct processing without complex module matching
+            debug("telegram", f"Forwarding message to conversation handler")
+            
+            # Process the message with the conversation handler
             response = await self._conversation_handler.process_user_message(
-                user_id, self._platform_name, message_text, metadata
-            )
-            
-            logger.info(f"Received response from conversation handler: {response[:50]}...")
-            
-            # Send the response
-            await context.bot.send_message(chat_id=chat_id, text=response)
-            
-            logger.info(
-                f"Sent response to user {user_id}",
                 user_id=user_id,
-                platform=self._platform_name
+                platform="telegram",
+                message_text=message_text
             )
+            
+            debug("telegram", f"Got response from conversation handler: '{response[:50]}...'")
+            
+            # Send the response back to the user
+            debug("telegram", f"Sending response to chat {chat_id}")
+            await context.bot.send_message(chat_id=chat_id, text=response)
+            logger.info(f"Sent response to user {user_id}")
+            debug("telegram", f"Sent response to user {user_id}")
+            
         except Exception as e:
-            logger.error(f"Error processing message: {e}", exc_info=True, user_id=user_id, platform=self._platform_name)
+            logger.error(f"Error processing message: {str(e)}", exc_info=True)
+            if debug_log:
+                debug_logging.log_error("TELEGRAM", f"Error processing message: {str(e)}", exc_info=True)
+            # Send an error message to the user
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="Sorry, I'm having trouble processing your message. Please try again later."
+                text=f"I'm sorry, I encountered an error while processing your message: {str(e)}"
             )
     
     async def send_reminder(self, user_id: str, task: str) -> bool:

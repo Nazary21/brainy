@@ -5,6 +5,7 @@ This module handles the flow of conversations between users and the bot.
 """
 from typing import Dict, Optional, Any, List
 import asyncio
+import sys
 
 from brainy.utils.logging import get_logger
 from brainy.core.memory_manager.memory_manager import ConversationMessage, MemoryManager, get_memory_manager
@@ -13,10 +14,29 @@ from brainy.adapters.ai_providers import get_default_provider, Message
 from brainy.core.modules import get_module_manager
 from brainy.config import settings
 from brainy.core.ai_provider.manager import AiProviderManager
+from brainy.core.conversation.message_formatter import MessageFormatter
+from brainy.core.conversation.conversation_history import ConversationHistory
+from brainy.core.character import get_character_manager
+from brainy.core.memory_manager import MessageRole
+from brainy.providers.ai_provider import AIProvider, get_ai_provider
+
+# Add custom debug logging if available
+try:
+    sys.path.append(".")  # Add project root to path
+    import debug_logging
+    debug_log = True
+except ImportError:
+    debug_log = False
 
 # Initialize logger
 logger = get_logger(__name__)
 
+# Debug logging function
+def debug(message):
+    if debug_log:
+        debug_logging.log_conversation(message)
+    # Also log at debug level in standard logger
+    logger.debug(message)
 
 class ConversationHandler:
     """
@@ -37,7 +57,10 @@ class ConversationHandler:
         memory_manager: MemoryManager,
         character_manager: CharacterManager,
         ai_provider_manager: AiProviderManager,
-        use_context_search: Optional[bool] = None
+        use_context_search: Optional[bool] = None,
+        history_provider: Optional[ConversationHistory] = None,
+        ai_provider: Optional[AIProvider] = None,
+        message_formatter: Optional[MessageFormatter] = None
     ):
         """
         Initialize a conversation handler.
@@ -47,6 +70,12 @@ class ConversationHandler:
             character_manager: The character manager to use
             ai_provider_manager: The AI provider manager to use  
             use_context_search: Whether to use context search. Defaults to settings.USE_CONTEXT_SEARCH
+            history_provider: Optional conversation history provider
+                If not provided, will use the default conversation history provider
+            ai_provider: Optional AI provider
+                If not provided, will use the default AI provider
+            message_formatter: Optional message formatter
+                If not provided, will use the default message formatter
         """
         # Initialize components
         self._memory_manager = memory_manager
@@ -64,7 +93,18 @@ class ConversationHandler:
         # Use context search
         self._use_context_search = use_context_search if use_context_search is not None else settings.USE_CONTEXT_SEARCH
         
+        # Set up conversation history
+        self.history_provider = history_provider or ConversationHistory()
+        
+        # Set up AI provider
+        self.ai_provider = ai_provider or get_ai_provider()
+        
+        # Set up message formatter
+        self.message_formatter = message_formatter or MessageFormatter()
+        
         logger.info("Initialized conversation handler")
+        if debug_log:
+            debug("Conversation handler initialized")
     
     async def _get_or_create_user_session(
         self,
@@ -190,166 +230,96 @@ class ConversationHandler:
         user_id: str,
         platform: str,
         message_text: str,
-        metadata: Optional[Dict[str, Any]] = None,
-        use_context_search: Optional[bool] = None
+        conversation_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None
     ) -> str:
         """
-        Process a message from a user and generate a response.
+        Process a user message and return an assistant response.
         
         Args:
-            user_id: ID of the user
-            platform: Platform the user is interacting on
-            message_text: Text of the user's message
-            metadata: Optional additional metadata for the message
-            use_context_search: Whether to use vector search for context retrieval.
-                If None, will use the value from settings.
-            
+            user_id: User ID
+            platform: Platform ID (e.g., 'telegram', 'slack')
+            message_text: Text of the user message
+            conversation_id: Optional conversation ID
+                If not provided, will be generated/retrieved automatically
+            context: Optional context for the message
+                Can include any data relevant to the conversation
+        
         Returns:
-            The bot's response text
+            Assistant response text
         """
-        # Get or create a session for the user
-        session = await self._get_or_create_user_session(user_id, platform)
+        debug(f"Processing user message from user {user_id} on platform {platform}")
+        debug(f"User message: '{message_text}'")
         
-        # Update the last activity timestamp
-        await self._update_session_activity(user_id)
-        
-        conversation_id = session["conversation_id"]
-        character = session["character"]
-        
-        # Determine whether to use context search
-        if use_context_search is None:
-            use_context_search = settings.USE_CONTEXT_SEARCH
-        
-        # Create the user message
-        user_message = ConversationMessage(
-            user_id=user_id,
-            role="user",
-            content=message_text,
-            conversation_id=conversation_id,
-            platform=platform
-        )
-        
-        # Add the user message to the conversation
-        await self._memory_manager.add_message(user_message)
-        
-        # Check if this is a command or matches a module
-        # First, check if the message is a command
-        if self._module_manager.is_command(message_text):
-            # Process the command with the module system
-            module_response = await self._module_manager.process_command(user_message)
+        try:
+            # Get the conversation ID if not provided
+            if not conversation_id:
+                conversation_id = f"{platform}:{user_id}"
             
-            if module_response is not None:
-                # Create an assistant message with the module response
-                assistant_message = ConversationMessage(
-                    user_id=user_id,
-                    role="assistant",
-                    content=module_response,
-                    conversation_id=conversation_id,
-                    platform=platform
-                )
-                
-                # Add the assistant message to the conversation
-                await self._memory_manager.add_message(assistant_message)
-                
-                return module_response
-        else:
-            # Check if the message matches any module patterns
-            module = await self._module_manager.find_matching_module(user_message)
-            if module:
-                # Process the message with the module
-                context = {
+            debug(f"Using conversation ID: {conversation_id}")
+            
+            # Get character for this conversation
+            character = self._character_manager.get_character_for_conversation(conversation_id)
+            debug(f"Using character: {character.name}")
+            
+            # Create conversation message object
+            user_message = ConversationMessage(
+                role=MessageRole.USER,
+                content=message_text,
+                metadata={
                     "user_id": user_id,
                     "platform": platform,
-                    "conversation_id": conversation_id,
-                    "character": character
+                    **(context or {})
                 }
-                
-                module_response = await module.process_message(user_message, context)
-                
-                if module_response is not None:
-                    # Create an assistant message with the module response
-                    assistant_message = ConversationMessage(
-                        user_id=user_id,
-                        role="assistant",
-                        content=module_response,
-                        conversation_id=conversation_id,
-                        platform=platform
-                    )
-                    
-                    # Add the assistant message to the conversation
-                    await self._memory_manager.add_message(assistant_message)
-                    
-                    return module_response
-        
-        # If no module handled the message, process it with the AI provider
-        # Get the conversation history, including the new message
-        messages = await self._memory_manager.get_conversation_history(
-            conversation_id, 
-            limit=self._max_context_length
-        )
-        
-        # Check if we need to add a system message
-        if not any(msg.role == "system" for msg in messages):
-            await self._add_system_message(conversation_id, user_id, platform, character)
-            # Get the updated messages
-            messages = await self._memory_manager.get_conversation_history(
-                conversation_id, 
-                limit=self._max_context_length
             )
-        
-        # Convert messages to AI messages
-        ai_messages = [msg.to_ai_message() for msg in messages]
-        
-        # Retrieve relevant context if enabled
-        if use_context_search:
+            
+            # Add user message to history
+            await self.history_provider.add_message(conversation_id, user_message)
+            debug(f"Added user message to history for conversation {conversation_id}")
+            
+            # Get conversation history
+            conversation_messages = await self.history_provider.get_messages(conversation_id)
+            debug(f"Retrieved {len(conversation_messages)} messages from history")
+            
+            # Format messages for AI provider
+            formatted_messages = self.message_formatter.format_messages(
+                messages=conversation_messages,
+                character=character
+            )
+            debug(f"Formatted messages for AI provider, message count: {len(formatted_messages)}")
+            
+            # Get response from AI provider
+            debug(f"Sending messages to AI provider")
             try:
-                # Get relevant context messages
-                context_messages = await self._retrieve_relevant_context(message_text, conversation_id)
-                
-                # If we have context messages, add a system message explaining the context
-                if context_messages:
-                    # Format the context messages
-                    context_text = "Here are some relevant previous interactions that may help with your response:\n\n"
-                    
-                    for i, msg in enumerate(context_messages):
-                        # Format the message with role and content
-                        context_text += f"{i+1}. {msg.role.capitalize()}: {msg.content}\n\n"
-                    
-                    # Add a context message at the beginning, after the system message
-                    context_message = Message(
-                        role="system",
-                        content=context_text
-                    )
-                    
-                    # Insert the context message after the system message
-                    system_index = next((i for i, msg in enumerate(ai_messages) if msg.role == "system"), 0)
-                    ai_messages.insert(system_index + 1, context_message)
-                    
-                    logger.debug(f"Added context from {len(context_messages)} previous messages")
+                ai_response = await self.ai_provider.generate_completion(formatted_messages)
+                debug(f"Received response from AI provider: '{ai_response[:50]}...'")
             except Exception as e:
-                logger.error(f"Error adding context from previous messages: {e}")
-        
-        # Generate a response using the AI provider
-        try:
-            response_content = await self._ai_provider_manager.generate_response(ai_messages)
-            logger.debug(f"Generated response", user_id=user_id, platform=platform)
+                logger.error(f"Error generating AI response: {str(e)}", exc_info=True)
+                if debug_log:
+                    debug_logging.log_error("CONVERSATION", f"Error generating AI response: {str(e)}", exc_info=True)
+                ai_response = "I'm sorry, I encountered an error processing your message. Please try again."
+            
+            # Create assistant message
+            assistant_message = ConversationMessage(
+                role=MessageRole.ASSISTANT,
+                content=ai_response,
+                metadata={
+                    "character_name": character.name,
+                    "character_id": character.character_id
+                }
+            )
+            
+            # Add assistant message to history
+            await self.history_provider.add_message(conversation_id, assistant_message)
+            debug(f"Added assistant response to history for conversation {conversation_id}")
+            
+            return ai_response
         except Exception as e:
-            logger.error(f"Error generating response: {e}", user_id=user_id, platform=platform)
-            response_content = "I'm sorry, I'm having trouble responding right now. Please try again later."
-        
-        # Create the assistant message
-        assistant_message = ConversationMessage(
-            user_id=user_id,
-            role="assistant",
-            content=response_content,
-            conversation_id=conversation_id,
-            platform=platform
-        )
-        
-        # Add the assistant message to the conversation
-        await self._memory_manager.add_message(assistant_message)
-        
-        return response_content
+            error_msg = f"Error processing user message: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            if debug_log:
+                debug_logging.log_error("CONVERSATION", error_msg, exc_info=True)
+            return f"I'm sorry, I encountered an error: {str(e)}"
     
     async def change_character(
         self,

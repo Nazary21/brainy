@@ -61,33 +61,39 @@ async def startup_event():
     logger.info(f"Log level: {settings.LOG_LEVEL}")
     logger.info(f"Vector DB path: {settings.VECTOR_DB_PATH}")
     
-    # Initialize core components
-    memory_manager = get_memory_manager()
-    character_manager = get_character_manager()
-    ai_provider_manager = get_ai_provider_manager()
-    
-    # Initialize conversation handler
-    conversation_handler = ConversationHandler(
-        memory_manager=memory_manager,
-        character_manager=character_manager,
-        ai_provider_manager=ai_provider_manager
-    )
-    
-    # Register built-in modules
-    await register_builtin_modules()
-    logger.info("Registered built-in modules")
-    
-    # Initialize Telegram bot
-    if not settings.TELEGRAM_BOT_TOKEN:
-        logger.warning("Telegram bot token not set, skipping bot initialization")
-    else:
-        # Initialize the Telegram adapter
-        _telegram_adapter = TelegramAdapter(
-            token=settings.TELEGRAM_BOT_TOKEN,
-            conversation_handler=conversation_handler
+    try:
+        # Initialize core components
+        memory_manager = get_memory_manager()
+        character_manager = get_character_manager()
+        ai_provider_manager = get_ai_provider_manager()
+        
+        # Initialize conversation handler
+        conversation_handler = ConversationHandler(
+            memory_manager=memory_manager,
+            character_manager=character_manager,
+            ai_provider_manager=ai_provider_manager
         )
-        asyncio.create_task(_telegram_adapter.start())
-        logger.info("Started Telegram bot adapter")
+        
+        # Register built-in modules
+        await register_builtin_modules()
+        logger.info("Registered built-in modules")
+        
+        # Initialize Telegram bot
+        if not settings.TELEGRAM_BOT_TOKEN:
+            logger.warning("Telegram bot token not set, skipping bot initialization")
+        else:
+            # Initialize the Telegram adapter
+            _telegram_adapter = TelegramAdapter(
+                token=settings.TELEGRAM_BOT_TOKEN,
+                conversation_handler=conversation_handler
+            )
+            
+            # Start the Telegram adapter in a separate task
+            asyncio.create_task(_telegram_adapter.start())
+            logger.info("Started Telegram bot adapter")
+    except Exception as e:
+        logger.error(f"Error during startup: {str(e)}", exc_info=True)
+        raise
 
 
 @app.on_event("shutdown")
