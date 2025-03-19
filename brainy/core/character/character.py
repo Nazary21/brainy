@@ -114,8 +114,15 @@ class CharacterManager:
         # Ensure characters directory exists
         os.makedirs(self._characters_dir, exist_ok=True)
         
+        # Initialize conversation preferences
+        self._conversation_preferences: Dict[str, str] = {}
+        self._preferences_file = self._characters_dir.parent / "preferences" / "character_preferences.json"
+        
         # Load characters from files
         self._load_characters()
+        
+        # Load conversation preferences
+        self._load_conversation_preferences()
         
         logger.info(f"Initialized character manager with {len(self._characters)} characters")
     
@@ -201,9 +208,15 @@ class CharacterManager:
             character_id: ID of the character to get
             
         Returns:
-            The character, or None if not found
+            The character if found, None otherwise
         """
-        return self._characters.get(character_id)
+        # Make lookup case-insensitive by comparing lowercase versions
+        character_id_lower = character_id.lower()
+        for id, character in self._characters.items():
+            if id.lower() == character_id_lower:
+                return character
+        
+        return None
     
     def get_default_character(self) -> Character:
         """
@@ -241,19 +254,29 @@ class CharacterManager:
     
     def get_character_for_conversation(self, conversation_id: str) -> Character:
         """
-        Get the character associated with a conversation.
+        Get the character for a conversation.
         
         Args:
-            conversation_id: ID of the conversation
+            conversation_id: The conversation ID
             
         Returns:
             The character associated with the conversation,
-            or the default character if none is specifically assigned
+            or the default character if none is set
         """
-        # For now, we don't have conversation-specific character storage
-        # In the future, this could be extended to get conversation-specific characters
-        # from a database or other storage
-        return self.get_default_character()
+        # Try to get the character_id for this conversation from preferences
+        character_id = self._conversation_preferences.get(conversation_id)
+        
+        # If no preference or character doesn't exist, return default
+        if not character_id:
+            return self.get_default_character()
+            
+        # Make lookup case-insensitive
+        character = self.get_character(character_id)
+        if not character:
+            # Character not found, return default
+            return self.get_default_character()
+            
+        return character
     
     def set_default_character(self, character_id: str) -> bool:
         """
@@ -286,6 +309,180 @@ class CharacterManager:
         logger.info(f"Set default character to '{character.name}'")
         
         return True
+    
+    def create_character(
+        self,
+        character_id: str,
+        name: str,
+        system_prompt: str,
+        description: str = "",
+        greeting: Optional[str] = None,
+        farewell: Optional[str] = None,
+        avatar_url: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Optional[Character]:
+        """
+        Create a new character.
+        
+        Args:
+            character_id: Unique identifier for the character
+            name: Display name of the character
+            system_prompt: System prompt that defines the character's personality
+            description: Description of the character
+            greeting: Optional custom greeting message
+            farewell: Optional custom farewell message
+            avatar_url: Optional URL to the character's avatar image
+            metadata: Optional additional metadata for the character
+            
+        Returns:
+            The created character, or None if creation failed
+        """
+        # Check if character ID already exists
+        if character_id in self._characters:
+            logger.warning(f"Character with ID '{character_id}' already exists")
+            return None
+        
+        # Create the character
+        character = Character(
+            character_id=character_id,
+            name=name,
+            system_prompt=system_prompt,
+            description=description,
+            greeting=greeting,
+            farewell=farewell,
+            avatar_url=avatar_url,
+            metadata=metadata or {}
+        )
+        
+        # Add the character to the manager
+        self.add_character(character)
+        
+        logger.info(f"Created character '{character.name}' with ID '{character_id}'")
+        
+        return character
+        
+    def edit_character(
+        self,
+        character_id: str,
+        **updates
+    ) -> Optional[Character]:
+        """
+        Edit an existing character.
+        
+        Args:
+            character_id: ID of the character to edit
+            **updates: Field updates for the character
+            
+        Returns:
+            The updated character, or None if the character wasn't found
+        """
+        # Check if character exists
+        if character_id not in self._characters:
+            logger.warning(f"Character with ID '{character_id}' does not exist")
+            return None
+        
+        # Get the current character data
+        character = self._characters[character_id]
+        character_data = character.to_dict()
+        
+        # Update the character data
+        for field, value in updates.items():
+            if field in character_data and value is not None:
+                character_data[field] = value
+        
+        # Create a new character with the updated data
+        updated_character = Character.from_dict(character_data)
+        
+        # Add the updated character to the manager
+        self.add_character(updated_character)
+        
+        logger.info(f"Updated character '{updated_character.name}' with ID '{character_id}'")
+        
+        return updated_character
+        
+    def delete_character(self, character_id: str) -> bool:
+        """
+        Delete a character.
+        
+        Args:
+            character_id: ID of the character to delete
+            
+        Returns:
+            True if the character was deleted, False otherwise
+            
+        Raises:
+            ValueError: If the character is the default character or doesn't exist
+        """
+        # Make lookup case-insensitive
+        character_to_delete = self.get_character(character_id)
+        
+        # Check if the character exists
+        if not character_to_delete:
+            logger.warning(f"Cannot delete character '{character_id}': character not found")
+            raise ValueError(f"Character '{character_id}' not found")
+        
+        # Get the actual character ID with correct case
+        actual_character_id = character_to_delete.character_id
+        
+        # Check if it's the default character
+        if actual_character_id == self._default_character_id:
+            logger.warning(f"Cannot delete default character '{actual_character_id}'")
+            raise ValueError("Cannot delete the default character")
+        
+        # Delete the character from memory
+        logger.info(f"Deleting character: {actual_character_id}")
+        if actual_character_id in self._characters:
+            del self._characters[actual_character_id]
+        
+        # Delete the character file if it exists
+        character_file = self._get_character_file_path(actual_character_id)
+        if character_file.exists():
+            try:
+                character_file.unlink()  # Delete the file
+                logger.info(f"Deleted character file: {character_file}")
+            except Exception as e:
+                logger.error(f"Error deleting character file {character_file}: {e}")
+                # Continue anyway - we've already removed it from memory
+        
+        # Remove from conversation preferences if present
+        for conv_id, char_id in list(self._conversation_preferences.items()):
+            if char_id.lower() == actual_character_id.lower():
+                # Reset this conversation to use the default character
+                self._conversation_preferences[conv_id] = self._default_character_id
+        
+        # Save updated preferences
+        self._save_conversation_preferences()
+        
+        return True
+
+    def _load_conversation_preferences(self) -> None:
+        """Load conversation character preferences from file."""
+        try:
+            if self._preferences_file.exists():
+                with open(self._preferences_file, "r", encoding="utf-8") as f:
+                    self._conversation_preferences = json.load(f)
+                logger.debug(f"Loaded character preferences for {len(self._conversation_preferences)} conversations")
+            else:
+                logger.debug("No character preferences file found, using defaults")
+        except Exception as e:
+            logger.error(f"Error loading character preferences: {e}")
+            self._conversation_preferences = {}
+            
+    def _save_conversation_preferences(self) -> None:
+        """Save conversation character preferences to file."""
+        try:
+            # Create directory if it doesn't exist
+            os.makedirs(self._preferences_file.parent, exist_ok=True)
+            
+            with open(self._preferences_file, "w", encoding="utf-8") as f:
+                json.dump(self._conversation_preferences, f, indent=2)
+            logger.debug(f"Saved character preferences for {len(self._conversation_preferences)} conversations")
+        except Exception as e:
+            logger.error(f"Error saving character preferences: {e}")
+            
+    def _get_character_file_path(self, character_id: str) -> Path:
+        """Get the path to a character file."""
+        return self._characters_dir / f"{character_id}.json"
 
 
 # Singleton instance

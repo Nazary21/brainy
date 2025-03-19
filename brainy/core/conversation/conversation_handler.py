@@ -305,10 +305,27 @@ class ConversationHandler:
             )
             debug(f"Formatted messages for AI provider, message count: {len(formatted_messages)}")
             
+            # Check for provider preferences for this conversation
+            provider_type = None
+            try:
+                # Try to get provider manager module
+                from brainy.core.modules.provider_manager import create_provider_manager_module
+                provider_manager = create_provider_manager_module()
+                # Get preferred provider for this conversation
+                provider_type = provider_manager.get_provider_for_conversation(conversation_id)
+                debug(f"Using provider '{provider_type}' for conversation {conversation_id}")
+            except Exception as e:
+                debug(f"Error getting provider preference, using default: {str(e)}")
+                logger.warning(f"Error getting provider preference: {str(e)}")
+            
             # Get response from AI provider
             debug(f"Sending messages to AI provider")
             try:
-                ai_response = await self.ai_provider.generate_completion(formatted_messages)
+                # Use the specified provider type if available
+                ai_response = await self._ai_provider_manager.generate_response(
+                    formatted_messages,
+                    provider_type=provider_type
+                )
                 debug(f"Received response from AI provider: '{ai_response[:50]}...'")
             except Exception as e:
                 logger.error(f"Error generating AI response: {str(e)}", exc_info=True)
@@ -361,30 +378,35 @@ class ConversationHandler:
         
         Args:
             user_id: ID of the user
-            platform: Platform the user is interacting on
-            character_id: ID of the character to change to
+            platform: The platform identifier
+            character_id: ID of the character to switch to
             
         Returns:
-            The new character, or None if not found
+            The new character if successful, None if character not found
         """
+        # Get the conversation ID
+        conversation_id = f"{platform}:{user_id}"
+        
         # Get the character
         character = self._character_manager.get_character(character_id)
-        
-        if character is None:
-            logger.warning(f"Character '{character_id}' not found", user_id=user_id, platform=platform)
+        if not character:
             return None
         
-        # Get or create a session for the user
+        # Get the session
         session = await self._get_or_create_user_session(user_id, platform)
         
-        # Update the character in the session
+        # Update the session with the new character
         session["character_id"] = character.character_id
         session["character"] = character
         
-        # Update the last activity timestamp
-        await self._update_session_activity(user_id)
+        # Save the character preference for this conversation
+        self._character_manager._conversation_preferences[conversation_id] = character.character_id
+        self._character_manager._save_conversation_preferences()
         
-        logger.info(f"Changed character to '{character.name}' for user {user_id}", user_id=user_id, platform=platform)
+        # Add system message for the new character
+        await self._add_system_message(conversation_id, user_id, platform, character)
+        
+        logger.info(f"Changed character for user {user_id} to '{character.name}'")
         
         return character
     

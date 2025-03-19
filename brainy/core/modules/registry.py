@@ -8,6 +8,7 @@ from typing import List, Dict, Any
 from brainy.utils.logging import get_logger
 from brainy.core.modules.base import Module, get_module_manager
 from brainy.core.modules.reminder import create_reminder_module
+from brainy.core.modules.provider_manager import create_provider_manager_module
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -24,6 +25,7 @@ async def register_builtin_modules() -> None:
     # Create and register modules
     modules = [
         create_reminder_module(),
+        create_provider_manager_module(),
         # Add more built-in modules here as they are created
     ]
     

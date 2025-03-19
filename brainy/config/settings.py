@@ -12,12 +12,16 @@ class Settings(BaseSettings):
     # API Keys
     TELEGRAM_BOT_TOKEN: str = Field("", description="Telegram Bot API token")
     OPENAI_API_KEY: str = Field("", description="OpenAI API key")
+    GROK_API_KEY: str = Field("", description="Grok API key")
     
     # AI Provider settings
     DEFAULT_AI_PROVIDER: str = Field("openai", description="Default AI provider to use")
     OPENAI_MODEL: str = Field("gpt-3.5-turbo", description="Default OpenAI model to use")
     OPENAI_TEMPERATURE: float = Field(0.7, description="Temperature for OpenAI API calls")
     OPENAI_MAX_TOKENS: int = Field(1000, description="Max tokens for OpenAI API calls")
+    GROK_MODEL: str = Field("grok-1", description="Default Grok model to use")
+    GROK_TEMPERATURE: float = Field(0.7, description="Temperature for Grok API calls")
+    GROK_MAX_TOKENS: int = Field(1000, description="Max tokens for Grok API calls")
     
     # Database
     DATABASE_URL: Optional[str] = Field(
@@ -96,6 +100,14 @@ class Settings(BaseSettings):
                 "model": self.OPENAI_MODEL,
                 "temperature": self.OPENAI_TEMPERATURE,
                 "max_tokens": self.OPENAI_MAX_TOKENS
+            }
+        
+        if provider_type == "grok":
+            return {
+                "api_key": self.GROK_API_KEY,
+                "model": self.GROK_MODEL,
+                "temperature": self.GROK_TEMPERATURE,
+                "max_tokens": self.GROK_MAX_TOKENS
             }
         
         # Add other provider configurations as needed

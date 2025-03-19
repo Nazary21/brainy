@@ -12,6 +12,8 @@ An intermediate API manager built in Python that connects multiple AI providers 
   - DeepSeek
   - Others (expandable)
 - Abstract interface to manage provider switching
+- AI provider selection per conversation
+- Command-based provider switching (/provider command)
 - API key management per user
 - Configurable model parameters (temperature, tokens, etc.)
 
@@ -24,14 +26,20 @@ An intermediate API manager built in Python that connects multiple AI providers 
 ### External Messenger Commands
 - Standard bot control commands:
   - `/start` - Initialize bot and display welcome message
-  - `/profile` - Display what the bot knows about the user
-  - `/clear` - Clear conversation history
   - `/help` - Show available commands and descriptions
-  - `/settings` - Quick access to configurable settings
+  - `/clear` - Clear conversation history
+- Character management commands:
+  - `/character <id>` - Switch to a specific character
+  - `/characters` - List all available characters
+  - `/create_character` - Create a new character with custom properties
+  - `/edit_character` - Edit an existing character's properties
+  - `/delete_character <id>` - Delete a character
+- AI Provider commands:
+  - `/provider` - View or change the AI provider for the current conversation
 - Module-specific commands:
-  - `/tasks` - Display task list
-  - `/shopping` - Show shopping list
-  - `/context` - Show active augmented context
+  - `/remind` - Set a reminder
+  - `/reminders` - List pending reminders
+  - `/clear_reminders` - Clear all reminders
 - Custom command registration system for modules
 - Command permissions based on user role
 - Command aliases for common operations

@@ -6,6 +6,7 @@ from typing import Dict, Optional
 from brainy.utils.logging import get_logger
 from brainy.adapters.ai_providers.base import AIProvider, AIProviderConfig
 from brainy.adapters.ai_providers.openai_provider import OpenAIProvider
+from brainy.adapters.ai_providers.grok_provider import GrokProvider
 from brainy.config import settings
 
 # Initialize logger
@@ -46,6 +47,8 @@ def create_provider(provider_type: str, config: Optional[AIProviderConfig] = Non
     # Create the provider instance
     if provider_type == "openai":
         provider = OpenAIProvider(config)
+    elif provider_type == "grok":
+        provider = GrokProvider(config)
     else:
         raise ValueError(f"Unsupported provider type: {provider_type}")
     
