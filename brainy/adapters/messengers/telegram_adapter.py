@@ -114,11 +114,18 @@ class TelegramAdapter:
         self.application.add_handler(CommandHandler("reminders", self._module_command_handler))
         self.application.add_handler(CommandHandler("clear_reminders", self._module_command_handler))
         
+        # Add explicit handler for debug commands when in debug mode
+        if settings.DEBUG:
+            self.application.add_handler(CommandHandler("debug_rag", self._module_command_handler))
+            logger.info("Registered debug_rag command handler")
+            debug("telegram", "Registered debug_rag command handler")
+        
         # Register module command handlers for dynamically registered commands
         # We'll catch all commands and route them to modules if applicable
         self.application.add_handler(
             MessageHandler(filters.COMMAND & ~filters.Command(["start", "help", "clear", "character", "characters", 
-                                                              "remind", "reminders", "clear_reminders"]), 
+                                                              "remind", "reminders", "clear_reminders"] + 
+                                                              (["debug_rag"] if settings.DEBUG else [])), 
                            self._module_command_handler)
         )
         
@@ -573,10 +580,20 @@ class TelegramAdapter:
         self._user_chat_map[user_id] = chat_id
         debug("telegram", f"Stored chat ID {chat_id} for user {user_id}")
         
+        # Check if this is a debug_rag command - add special logging
+        is_debug_rag = message_text.startswith('/debug_rag')
+        if is_debug_rag:
+            print(f"[DEBUG] Processing debug_rag command: {message_text}")
+            logger.info(f"Processing debug_rag command from user {user_id}: {message_text}")
+            debug("telegram", f"Processing debug_rag command from user {user_id}: {message_text}")
+        
         try:
             # Parse the command
             command, args = self._module_manager.parse_command(message_text)
             print(f"[DEBUG] Parsed command: '{command}' with args: {args}")
+            
+            if is_debug_rag:
+                print(f"[DEBUG] Parsed debug_rag command with args: {args}")
             
             # Print all available module commands
             all_module_commands = self._get_all_module_commands()

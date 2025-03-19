@@ -276,6 +276,7 @@ class ConversationHandler:
                 metadata={
                     "user_id": user_id,
                     "platform": platform,
+                    "conversation_id": conversation_id,  # Add conversation_id explicitly to metadata
                     **(context or {})
                 }
             )
@@ -283,6 +284,15 @@ class ConversationHandler:
             # Add user message to history
             await self.history_provider.add_message(conversation_id, user_message)
             debug(f"Added user message to history for conversation {conversation_id}")
+            
+            # IMPORTANT: Also add the message to the memory manager for vector storage
+            try:
+                debug(f"Adding user message to memory manager for vector storage")
+                await self._memory_manager.add_message(user_message)
+                debug(f"Successfully added user message to memory manager")
+            except Exception as e:
+                debug(f"Error adding user message to memory manager: {str(e)}")
+                logger.error(f"Error adding user message to memory manager: {str(e)}", exc_info=True)
             
             # Get conversation history
             conversation_messages = await self.history_provider.get_messages(conversation_id)
@@ -311,6 +321,9 @@ class ConversationHandler:
                 role=MessageRole.ASSISTANT,
                 content=ai_response,
                 metadata={
+                    "user_id": user_id,
+                    "platform": platform,
+                    "conversation_id": conversation_id,  # Add conversation_id explicitly to metadata
                     "character_name": character.name,
                     "character_id": character.character_id
                 }
@@ -319,6 +332,15 @@ class ConversationHandler:
             # Add assistant message to history
             await self.history_provider.add_message(conversation_id, assistant_message)
             debug(f"Added assistant response to history for conversation {conversation_id}")
+            
+            # IMPORTANT: Also add the assistant message to the memory manager for vector storage
+            try:
+                debug(f"Adding assistant message to memory manager for vector storage")
+                await self._memory_manager.add_message(assistant_message)
+                debug(f"Successfully added assistant message to memory manager")
+            except Exception as e:
+                debug(f"Error adding assistant message to memory manager: {str(e)}")
+                logger.error(f"Error adding assistant message to memory manager: {str(e)}", exc_info=True)
             
             return ai_response
         except Exception as e:

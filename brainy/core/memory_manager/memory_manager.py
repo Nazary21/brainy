@@ -151,6 +151,11 @@ class MemoryManager:
             else:
                 raise ValueError("Message must have either conversation_id or both user_id and platform in metadata")
         
+        # Debug log the conversation ID and user ID
+        print(f"[DEBUG] MemoryManager.add_message: Adding message to conversation {conversation_id}")
+        print(f"[DEBUG] MemoryManager.add_message: Message content: {message.content[:50]}...")
+        print(f"[DEBUG] MemoryManager.add_message: Role: {message.role}, User ID: {message.metadata.get('user_id')}")
+        
         # Store message
         message_id = message.message_id
         self._messages[message_id] = message
@@ -178,23 +183,36 @@ class MemoryManager:
                     "timestamp": message.timestamp.isoformat()
                 }
                 
-                # Add the message to the vector store
-                vector_id = await self._vector_store.add_document(
-                    text=message.content,
-                    metadata=metadata,
-                    document_id=message.message_id
-                )
+                # Debug log the vector store operation
+                print(f"[DEBUG] MemoryManager.add_message: Adding message to vector store with metadata: {metadata}")
                 
-                # Update the message with the vector ID
-                message.metadata["vector_id"] = vector_id
-                
-                logger.debug(
-                    f"Added message to vector store",
-                    message_id=message.message_id,
-                    vector_id=vector_id
-                )
+                # Check if vector store is initialized
+                if not self._vector_store:
+                    print(f"[DEBUG] MemoryManager.add_message: ERROR - Vector store is not initialized!")
+                    logger.error("Vector store is not initialized when trying to add message")
+                else:
+                    # Add the message to the vector store
+                    vector_id = await self._vector_store.add_document(
+                        text=message.content,
+                        metadata=metadata,
+                        document_id=message.message_id
+                    )
+                    
+                    # Update the message with the vector ID
+                    message.metadata["vector_id"] = vector_id
+                    
+                    print(f"[DEBUG] MemoryManager.add_message: Successfully added message to vector store with ID: {vector_id}")
+                    
+                    logger.debug(
+                        f"Added message to vector store",
+                        message_id=message.message_id,
+                        vector_id=vector_id
+                    )
             except Exception as e:
+                print(f"[DEBUG] MemoryManager.add_message: ERROR adding message to vector store: {e}")
                 logger.error(f"Error adding message to vector store: {e}")
+        else:
+            print(f"[DEBUG] MemoryManager.add_message: Skipping vector store for system message")
         
         return message_id
     
@@ -341,23 +359,28 @@ class MemoryManager:
             List of similar messages
         """
         try:
+            print(f"[DEBUG] MemoryManager.search_similar_messages: Starting search for '{query_text}'")
             logger.info(f"Vector search: Starting search for '{query_text[:30]}...'")
             
             # Prepare metadata filter if conversation_id is provided
             filter_metadata = None
             if conversation_id:
                 filter_metadata = {"conversation_id": conversation_id}
+                print(f"[DEBUG] MemoryManager.search_similar_messages: Filtering by conversation_id: {conversation_id}")
                 logger.info(f"Vector search: Filtering by conversation_id: {conversation_id}")
             
             # Check if vector store is initialized
             if not self._vector_store:
+                print(f"[DEBUG] MemoryManager.search_similar_messages: ERROR - Vector store not initialized")
                 logger.error("Vector search: Vector store not initialized")
                 return []
                 
             # Log the vector store path
+            print(f"[DEBUG] MemoryManager.search_similar_messages: Using vector store at path: {self._vector_store.db_path}")
             logger.info(f"Vector search: Using vector store at path: {self._vector_store.db_path}")
             
             # Query the vector store for similar messages
+            print(f"[DEBUG] MemoryManager.search_similar_messages: Querying vector store with limit: {limit}")
             logger.info(f"Vector search: Querying vector store with limit: {limit}")
             similar_docs = self._vector_store.query(
                 query_text=query_text,
@@ -365,7 +388,30 @@ class MemoryManager:
                 limit=limit
             )
             
+            print(f"[DEBUG] MemoryManager.search_similar_messages: Found {len(similar_docs)} document(s) in vector store")
             logger.info(f"Vector search: Found {len(similar_docs)} document(s) in vector store")
+            
+            if len(similar_docs) == 0:
+                print(f"[DEBUG] MemoryManager.search_similar_messages: No similar documents found")
+                
+                # Try without conversation filter to see if any documents exist at all
+                if conversation_id:
+                    print(f"[DEBUG] MemoryManager.search_similar_messages: Trying without conversation filter...")
+                    all_docs = self._vector_store.query(
+                        query_text=query_text,
+                        limit=limit
+                    )
+                    print(f"[DEBUG] MemoryManager.search_similar_messages: Found {len(all_docs)} document(s) without conversation filter")
+                    
+                    # Check what conversation IDs exist
+                    conversation_ids = set()
+                    for doc in all_docs:
+                        conv_id = doc.get("metadata", {}).get("conversation_id")
+                        if conv_id:
+                            conversation_ids.add(conv_id)
+                    
+                    if conversation_ids:
+                        print(f"[DEBUG] MemoryManager.search_similar_messages: Existing conversation IDs: {conversation_ids}")
             
             # Convert to ConversationMessages
             messages = []
@@ -377,6 +423,7 @@ class MemoryManager:
                     # If we have the message in memory, use that
                     if message_id in self._messages:
                         messages.append(self._messages[message_id])
+                        print(f"[DEBUG] MemoryManager.search_similar_messages: Retrieved message {message_id} from memory")
                         logger.info(f"Vector search: Retrieved message {message_id} from memory")
                     else:
                         # Otherwise, construct a new message from the document
@@ -399,13 +446,17 @@ class MemoryManager:
                             timestamp=timestamp
                         )
                         messages.append(message)
+                        print(f"[DEBUG] MemoryManager.search_similar_messages: Constructed message from document {message_id}")
                         logger.info(f"Vector search: Constructed message from document {message_id}")
                 except Exception as e:
+                    print(f"[DEBUG] MemoryManager.search_similar_messages: Error converting document to message: {e}")
                     logger.error(f"Vector search: Error converting document to message: {str(e)}")
             
+            print(f"[DEBUG] MemoryManager.search_similar_messages: Returning {len(messages)} message(s)")
             logger.info(f"Vector search: Returning {len(messages)} message(s)")
             return messages
         except Exception as e:
+            print(f"[DEBUG] MemoryManager.search_similar_messages: ERROR searching similar messages: {e}")
             logger.error(f"Vector search: Error searching similar messages: {str(e)}", exc_info=True)
             return []
 

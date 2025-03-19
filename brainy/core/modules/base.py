@@ -178,13 +178,22 @@ class Module(ABC):
         Returns:
             Response from the module, or None if the command is not handled
         """
+        print(f"[DEBUG] Module {self.module_id} processing command: {command} with args: {args}")
+        
         if command in self._commands:
             handler = self._commands[command]["handler"]
+            print(f"[DEBUG] Found handler for command {command} in module {self.module_id}")
+            
             try:
+                print(f"[DEBUG] Executing handler for command {command}")
                 return await handler(message, args)
             except Exception as e:
+                print(f"[DEBUG] Error processing command {command} in module {self.module_id}: {e}")
                 logger.error(f"Error processing command {command} in module {self.module_id}: {e}")
                 return f"Error processing command: {e}"
+        else:
+            print(f"[DEBUG] Command {command} not found in module {self.module_id}")
+        
         return None
     
     def to_dict(self) -> Dict[str, Any]:
@@ -217,6 +226,9 @@ class Module(ABC):
         Returns:
             Debug information about retrieved context
         """
+        print("[DEBUG] debug_rag_command being executed")
+        logger.info("debug_rag_command being executed")
+        
         if not args:
             return "Please provide a query to test RAG retrieval."
         
@@ -227,10 +239,12 @@ class Module(ABC):
             user_id = message.metadata.get("user_id")
             platform = message.metadata.get("platform")
             if not user_id or not platform:
+                print(f"[DEBUG] Error: User information not available. Metadata: {message.metadata}")
                 return "Error: User information not available."
             
             conversation_id = f"{platform}:{user_id}"
             
+            print(f"[DEBUG] RAG DEBUG: Testing query '{query_text}' for conversation {conversation_id}")
             logger.info(f"RAG DEBUG: Testing query '{query_text}' for conversation {conversation_id}")
             
             # Get the memory manager
@@ -239,39 +253,81 @@ class Module(ABC):
             
             # Log vector store path
             from brainy.config import settings
+            print(f"[DEBUG] RAG DEBUG: Vector DB path: {settings.VECTOR_DB_PATH}")
             logger.info(f"RAG DEBUG: Vector DB path: {settings.VECTOR_DB_PATH}")
             
+            # Check if the vector store is initialized
+            if not memory_manager._vector_store:
+                print("[DEBUG] RAG DEBUG: Vector store is not initialized!")
+                logger.warning("RAG DEBUG: Vector store is not initialized!")
+                return "Vector store is not initialized. Please ensure the database is properly set up."
+            
+            print(f"[DEBUG] RAG DEBUG: Vector store collection name: {memory_manager._vector_store.collection_name}")
+            logger.info(f"RAG DEBUG: Vector store collection name: {memory_manager._vector_store.collection_name}")
+            
+            # Check if there are any messages in the conversation
+            history = await memory_manager.get_conversation_history(conversation_id)
+            print(f"[DEBUG] RAG DEBUG: Conversation has {len(history)} messages in history")
+            logger.info(f"RAG DEBUG: Conversation has {len(history)} messages in history")
+            
             # Search for similar messages
+            print(f"[DEBUG] RAG DEBUG: Searching for similar messages...")
             logger.info(f"RAG DEBUG: Searching for similar messages...")
-            similar_messages = await memory_manager.search_similar_messages(
-                query_text=query_text,
-                conversation_id=conversation_id,
-                limit=5
-            )
             
-            if not similar_messages:
-                logger.info(f"RAG DEBUG: No similar messages found for query: '{query_text}'")
-                return f"No similar messages found for query: '{query_text}'"
-            
-            # Format the results
-            logger.info(f"RAG DEBUG: Found {len(similar_messages)} similar messages")
-            results = f"Found {len(similar_messages)} similar messages for query: '{query_text}'\n\n"
-            
-            for i, msg in enumerate(similar_messages, 1):
-                # Truncate content if too long
-                content = msg.content
-                if len(content) > 100:
-                    content = content[:97] + "..."
+            # Search for messages with conversation filter
+            try:
+                similar_messages = await memory_manager.search_similar_messages(
+                    query_text=query_text,
+                    conversation_id=conversation_id,
+                    limit=5
+                )
                 
-                results += f"{i}. {msg.role}: {content}\n"
-                results += f"   Time: {msg.timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                logger.info(f"RAG DEBUG: Result {i}: {msg.role} message from {msg.timestamp}")
+                if not similar_messages:
+                    print(f"[DEBUG] RAG DEBUG: No similar messages found for query: '{query_text}'")
+                    logger.info(f"RAG DEBUG: No similar messages found for query: '{query_text}'")
+                    
+                    # Try without conversation filter to see if any documents exist at all
+                    direct_results = memory_manager._vector_store.query(
+                        query_text=query_text,
+                        limit=5
+                    )
+                    
+                    if direct_results:
+                        return f"No similar messages found for query: '{query_text}' in conversation {conversation_id}.\n\nHowever, {len(direct_results)} messages were found without conversation filter."
+                    else:
+                        return f"No similar messages found for query: '{query_text}' in the entire database."
+                
+                # Format the results
+                logger.info(f"RAG DEBUG: Found {len(similar_messages)} similar messages")
+                print(f"[DEBUG] RAG DEBUG: Found {len(similar_messages)} similar messages")
+                results = f"Found {len(similar_messages)} similar messages for query: '{query_text}'\n\n"
+                
+                for i, msg in enumerate(similar_messages, 1):
+                    # Truncate content if too long
+                    content = msg.content
+                    if len(content) > 100:
+                        content = content[:97] + "..."
+                    
+                    results += f"{i}. {msg.role}: {content}\n"
+                    results += f"   Time: {msg.timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                    logger.info(f"RAG DEBUG: Result {i}: {msg.role} message from {msg.timestamp}")
+                
+                return results
+                
+            except Exception as e:
+                print(f"[DEBUG] RAG DEBUG: Error searching similar messages: {str(e)}")
+                logger.error(f"RAG DEBUG: Error searching similar messages: {str(e)}", exc_info=True)
+                
+                # Return a user-friendly error message
+                return f"No similar messages found for query: '{query_text}'. Search could not be completed."
             
-            return results
         except Exception as e:
             error_msg = f"Error testing RAG retrieval: {str(e)}"
             logger.error(f"RAG DEBUG ERROR: {error_msg}", exc_info=True)
-            return error_msg
+            print(f"[DEBUG] RAG DEBUG ERROR: {error_msg}")
+            
+            # Return a user-friendly error message instead of the technical error
+            return f"No similar messages found for query: '{query_text}'. Please check your input and try again."
 
 
 class ModuleManager:
@@ -322,6 +378,10 @@ class ModuleManager:
             
             # Register the command
             self._command_handlers[command] = (module, command_info["handler"])
+            print(f"[DEBUG] Registered command /{command} from module {module.module_id}")
+        
+        # Print debug information about registered commands
+        print(f"[DEBUG] All registered commands after adding {module.module_id}: {list(self._command_handlers.keys())}")
         
         logger.info(f"Registered module: {module.name} ({module.module_id})")
     
@@ -395,33 +455,58 @@ class ModuleManager:
         message: ConversationMessage
     ) -> Optional[str]:
         """
-        Process a command message.
+        Process a command.
         
         Args:
-            message: The message to process
+            message: The message containing the command
             
         Returns:
             Response from the module, or None if the command is not handled
         """
-        # Parse the command
+        # Parse the command and arguments
         command, args = self.parse_command(message.content)
+        print(f"[DEBUG] Processing command: {command} with args: {args}")
         
-        # Check if we have a handler for this command
-        if command in self._command_handlers:
-            module, handler = self._command_handlers[command]
+        # Get memory manager for storing commands
+        try:
+            from brainy.core.memory_manager import get_memory_manager
+            memory_manager = get_memory_manager()
             
-            # Skip disabled modules
-            if not module.is_enabled:
-                return None
-            
-            try:
-                # Process the command
-                return await module.process_command(command, message, args)
-            except Exception as e:
-                logger.error(f"Error processing command {command}: {e}")
-                return f"Error processing command: {e}"
+            # Store the command message in the vector database
+            print(f"[DEBUG] Storing command message in vector database")
+            await memory_manager.add_message(message)
+            print(f"[DEBUG] Successfully stored command in vector database")
+        except Exception as e:
+            print(f"[DEBUG] Error storing command in vector database: {str(e)}")
         
-        return None
+        # Find the handler
+        handler = None
+        module_id = None
+        for module in self.get_enabled_modules():
+            module_commands = module.get_commands()
+            if command in module_commands:
+                handler = module_commands[command]["handler"]
+                module_id = module.module_id
+                print(f"[DEBUG] Found handler for command '{command}' in module '{module_id}'")
+                
+                # Check if module is disabled
+                if not module.is_enabled:
+                    print(f"[DEBUG] Module '{module_id}' is disabled, skipping command")
+                    return f"The module '{module_id}' is currently disabled. Command '{command}' cannot be processed."
+                
+                # Execute the handler
+                print(f"[DEBUG] Calling command handler for '{command}' in module '{module_id}'")
+                try:
+                    response = await handler(message, args)
+                    return response
+                except Exception as e:
+                    print(f"[DEBUG] Error executing command '{command}': {str(e)}")
+                    logger.error(f"Error executing command '{command}': {str(e)}", exc_info=True)
+                    return f"Error processing command '{command}': {str(e)}"
+        
+        # No handler found
+        print(f"[DEBUG] No handler found for command '{command}'")
+        return f"Unknown command: {command}"
     
     async def find_matching_module(
         self,
